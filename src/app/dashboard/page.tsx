@@ -248,6 +248,7 @@ export default function DashboardPage() {
             <NodeDetailView
               node={selectedNode}
               sensorData={sensorReading}
+              currentSimMinute={simMinutes}
               onBackToMap={handleBackToCanvas}
             />
           )}

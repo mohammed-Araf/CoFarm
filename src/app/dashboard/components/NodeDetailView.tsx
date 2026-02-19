@@ -1,6 +1,8 @@
 'use client';
 
+import { useState } from 'react';
 import { SensorReading } from '@/lib/simulator';
+import { AnalyticsTab } from './analytics/AnalyticsTab';
 
 interface NodeData {
   node_id: string;
@@ -14,6 +16,7 @@ interface NodeData {
 interface NodeDetailViewProps {
   node: NodeData;
   sensorData: SensorReading | null;
+  currentSimMinute: number;
   onBackToMap: () => void;
 }
 
@@ -35,11 +38,13 @@ const sensorFields: { key: keyof SensorReading; label: string; unit: string; ico
   { key: 'vpd_kpa', label: 'VPD', unit: 'kPa', icon: '🍃' },
 ];
 
-export default function NodeDetailView({ node, sensorData, onBackToMap }: NodeDetailViewProps) {
+export default function NodeDetailView({ node, sensorData, currentSimMinute, onBackToMap }: NodeDetailViewProps) {
+  const [activeTab, setActiveTab] = useState<'overview' | 'analytics'>('overview');
+
   return (
     <div className="h-full flex flex-col bg-gray-900/90 animate-fadeIn overflow-hidden">
-      {/* Map Button */}
-      <div className="p-4">
+      {/* Map Button and Tab Navigation */}
+      <div className="p-4 space-y-3">
         <button
           onClick={onBackToMap}
           className="flex items-center gap-2 px-4 py-2 bg-gray-800/80 border border-gray-700/50 rounded-xl text-gray-300 hover:border-green-500/50 hover:text-green-400 transition-all text-sm cursor-pointer"
@@ -47,6 +52,30 @@ export default function NodeDetailView({ node, sensorData, onBackToMap }: NodeDe
           <span>←</span>
           <span>Back</span>
         </button>
+
+        {/* Tab Navigation */}
+        <div className="flex gap-2">
+          <button
+            onClick={() => setActiveTab('overview')}
+            className={`flex-1 px-4 py-2 rounded-xl text-sm font-medium transition-all ${
+              activeTab === 'overview'
+                ? 'bg-green-500/20 text-green-400 border border-green-500/50'
+                : 'bg-gray-800/50 text-gray-400 border border-gray-700/30 hover:border-gray-600'
+            }`}
+          >
+            Overview
+          </button>
+          <button
+            onClick={() => setActiveTab('analytics')}
+            className={`flex-1 px-4 py-2 rounded-xl text-sm font-medium transition-all ${
+              activeTab === 'analytics'
+                ? 'bg-green-500/20 text-green-400 border border-green-500/50'
+                : 'bg-gray-800/50 text-gray-400 border border-gray-700/30 hover:border-gray-600'
+            }`}
+          >
+            Analytics
+          </button>
+        </div>
       </div>
 
       {/* Node Info */}
@@ -71,59 +100,65 @@ export default function NodeDetailView({ node, sensorData, onBackToMap }: NodeDe
         </div>
       </div>
 
-      {/* Sensor Data Grid */}
+      {/* Content Area */}
       <div className="flex-1 overflow-y-auto px-4 pb-4">
-        {sensorData ? (
-          <>
-            <div className="grid grid-cols-3 gap-2">
-              {sensorFields.map((field) => (
-                <div
-                  key={field.key}
-                  className="bg-gray-800/50 border border-gray-700/30 rounded-xl p-3 hover:border-green-500/30 transition-all"
-                >
-                  <div className="flex items-center gap-1.5 mb-1">
-                    <span className="text-sm">{field.icon}</span>
-                    <span className="text-[10px] text-gray-500 uppercase tracking-wider">{field.label}</span>
+        {activeTab === 'overview' ? (
+          // Overview Tab - Original sensor data grid
+          sensorData ? (
+            <>
+              <div className="grid grid-cols-3 gap-2">
+                {sensorFields.map((field) => (
+                  <div
+                    key={field.key}
+                    className="bg-gray-800/50 border border-gray-700/30 rounded-xl p-3 hover:border-green-500/30 transition-all"
+                  >
+                    <div className="flex items-center gap-1.5 mb-1">
+                      <span className="text-sm">{field.icon}</span>
+                      <span className="text-[10px] text-gray-500 uppercase tracking-wider">{field.label}</span>
+                    </div>
+                    <div className="text-lg font-semibold text-white">
+                      {typeof sensorData[field.key] === 'number'
+                        ? (sensorData[field.key] as number).toFixed(2)
+                        : sensorData[field.key]}
+                    </div>
+                    <div className="text-[10px] text-gray-600">{field.unit}</div>
                   </div>
-                  <div className="text-lg font-semibold text-white">
-                    {typeof sensorData[field.key] === 'number'
-                      ? (sensorData[field.key] as number).toFixed(2)
-                      : sensorData[field.key]}
-                  </div>
-                  <div className="text-[10px] text-gray-600">{field.unit}</div>
-                </div>
-              ))}
-            </div>
-
-            {/* Frost Risk */}
-            <div className={`mt-3 p-3 rounded-xl border ${
-              sensorData.frost_risk_flag === 'HIGH'
-                ? 'bg-red-500/10 border-red-500/30'
-                : sensorData.frost_risk_flag === 'LOW'
-                ? 'bg-yellow-500/10 border-yellow-500/30'
-                : 'bg-green-500/10 border-green-500/30'
-            }`}>
-              <div className="flex items-center gap-2">
-                <span>❄️</span>
-                <span className="text-sm font-medium text-white">Frost Risk</span>
-                <span className={`ml-auto text-sm font-bold ${
-                  sensorData.frost_risk_flag === 'HIGH' ? 'text-red-400' :
-                  sensorData.frost_risk_flag === 'LOW' ? 'text-yellow-400' :
-                  'text-green-400'
-                }`}>
-                  {sensorData.frost_risk_flag}
-                </span>
+                ))}
               </div>
-            </div>
 
-            <p className="text-[10px] text-gray-600 mt-3 text-center">
-              Last updated: {new Date(sensorData.timestamp).toLocaleTimeString()}
-            </p>
-          </>
+              {/* Frost Risk */}
+              <div className={`mt-3 p-3 rounded-xl border ${
+                sensorData.frost_risk_flag === 'HIGH'
+                  ? 'bg-red-500/10 border-red-500/30'
+                  : sensorData.frost_risk_flag === 'LOW'
+                  ? 'bg-yellow-500/10 border-yellow-500/30'
+                  : 'bg-green-500/10 border-green-500/30'
+              }`}>
+                <div className="flex items-center gap-2">
+                  <span>❄️</span>
+                  <span className="text-sm font-medium text-white">Frost Risk</span>
+                  <span className={`ml-auto text-sm font-bold ${
+                    sensorData.frost_risk_flag === 'HIGH' ? 'text-red-400' :
+                    sensorData.frost_risk_flag === 'LOW' ? 'text-yellow-400' :
+                    'text-green-400'
+                  }`}>
+                    {sensorData.frost_risk_flag}
+                  </span>
+                </div>
+              </div>
+
+              <p className="text-[10px] text-gray-600 mt-3 text-center">
+                Last updated: {new Date(sensorData.timestamp).toLocaleTimeString()}
+              </p>
+            </>
+          ) : (
+            <div className="flex items-center justify-center h-full text-gray-500 text-sm">
+              Waiting for sensor data...
+            </div>
+          )
         ) : (
-          <div className="flex items-center justify-center h-full text-gray-500 text-sm">
-            Waiting for sensor data...
-          </div>
+          // Analytics Tab
+          <AnalyticsTab nodeId={node.node_id} currentSimMinute={currentSimMinute} />
         )}
       </div>
 
