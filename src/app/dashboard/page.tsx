@@ -3,7 +3,7 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
-import { generateTimeBasedReading, SensorReading, Alert, checkForAlerts } from '@/lib/simulator';
+import { SensorReading, Alert, checkForAlerts } from '@/lib/simulator';
 import AlertsPanel from './components/AlertsPanel';
 import NodeDiscoveryPanel from './components/NodeDiscoveryPanel';
 import InfiniteCanvas from './components/InfiniteCanvas';
@@ -33,6 +33,10 @@ export default function DashboardPage() {
   const [simSpeed, setSimSpeed] = useState(1);
   const [simMinutes, setSimMinutes] = useState(0); // 0–1439 (0:00 to 23:59)
   const simIntervalRef = useRef<NodeJS.Timeout | null>(null);
+
+  // Database sensor data cache for the selected node
+  const [dbSensorData, setDbSensorData] = useState<SensorReading[]>([]);
+  const [sensorDataLoading, setSensorDataLoading] = useState(false);
 
   // Prevent page-level zoom (trackpad pinch)
   useEffect(() => {
@@ -98,16 +102,12 @@ export default function DashboardPage() {
 
     if (!isPlaying) return;
 
-    // Advance 1 simulated minute per (1000 / simSpeed) ms
-    // At 1X: 1 min/sec → full day in 24 min
-    // At 2X: 2 min/sec → full day in 12 min
-    // At 4X: 4 min/sec → full day in 6 min
     const intervalMs = 1000 / simSpeed;
 
     simIntervalRef.current = setInterval(() => {
       setSimMinutes((prev) => {
         const next = prev + 1;
-        return next >= 1440 ? 0 : next; // Loop at 23:59
+        return next >= 1440 ? 0 : next;
       });
     }, intervalMs);
 
@@ -116,26 +116,70 @@ export default function DashboardPage() {
     };
   }, [isPlaying, simSpeed]);
 
-  // Update sensor data when sim time changes and a node is selected
+  // Fetch sensor_data from DB when a node is selected
   useEffect(() => {
     if (!selectedNode) {
+      setDbSensorData([]);
       setSensorReading(null);
       return;
     }
 
-    const reading = generateTimeBasedReading(selectedNode.node_id, simMinutes);
+    const fetchSensorData = async () => {
+      setSensorDataLoading(true);
+      const { data, error } = await supabase
+        .from('sensor_data')
+        .select('*')
+        .eq('node_id', selectedNode.node_id)
+        .order('timestamp', { ascending: true });
+
+      if (error) {
+        console.error('Error fetching sensor data:', error);
+        setDbSensorData([]);
+      } else {
+        setDbSensorData((data as SensorReading[]) || []);
+      }
+      setSensorDataLoading(false);
+    };
+
+    fetchSensorData();
+  }, [selectedNode]);
+
+  // Map simMinutes to the closest sensor_data row from DB
+  useEffect(() => {
+    if (!selectedNode || dbSensorData.length === 0) {
+      if (!sensorDataLoading) setSensorReading(null);
+      return;
+    }
+
+    // Find the closest reading by comparing simMinutes to the timestamp's hour:minute
+    let bestIdx = 0;
+    let bestDiff = Infinity;
+
+    for (let i = 0; i < dbSensorData.length; i++) {
+      const ts = new Date(dbSensorData[i].timestamp);
+      const rowMinutes = ts.getHours() * 60 + ts.getMinutes();
+      const diff = Math.abs(rowMinutes - simMinutes);
+      // Also consider wrapping around midnight
+      const wrapDiff = 1440 - diff;
+      const minDiff = Math.min(diff, wrapDiff);
+      if (minDiff < bestDiff) {
+        bestDiff = minDiff;
+        bestIdx = i;
+      }
+    }
+
+    const reading = dbSensorData[bestIdx];
     setSensorReading(reading);
 
     // Generate alerts from reading
     const alert = checkForAlerts(reading);
     if (alert) {
       setAlerts((prev) => {
-        // Keep max 20 alerts, most recent first
         const updated = [alert, ...prev];
         return updated.slice(0, 20);
       });
     }
-  }, [selectedNode, simMinutes]);
+  }, [selectedNode, simMinutes, dbSensorData, sensorDataLoading]);
 
   const handleNodeClick = (node: NodeData) => {
     // Only allow detail view for own nodes

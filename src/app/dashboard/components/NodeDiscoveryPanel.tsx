@@ -267,10 +267,12 @@ export default function NodeDiscoveryPanel({
         {/* Timer Display */}
         <div className="flex items-center justify-center gap-2">
           <span className="text-[10px] text-gray-500 uppercase tracking-wider">SIM</span>
-          <div className="font-mono text-2xl font-bold text-white tracking-wider">
-            {String(Math.floor(simMinutes / 60)).padStart(2, '0')}
-            <span className={`${isPlaying ? 'animate-pulse' : ''} text-green-400`}>:</span>
-            {String(Math.floor(simMinutes % 60)).padStart(2, '0')}
+          <div className="font-mono text-2xl font-bold text-white tracking-wider flex items-baseline gap-1">
+            <span className="text-xs text-gray-500 font-medium">H</span>
+            <span>{Math.floor(simMinutes / 60)}</span>
+            <span className={`${isPlaying ? 'animate-pulse' : ''} text-green-400 mx-0.5`}>:</span>
+            <span className="text-xs text-gray-500 font-medium">M</span>
+            <span>{Math.floor(simMinutes % 60)}</span>
           </div>
           <span className={`text-[10px] px-1.5 py-0.5 rounded-full font-bold ${
             isPlaying
@@ -302,11 +304,11 @@ export default function NodeDiscoveryPanel({
 
         {/* Time markers */}
         <div className="flex justify-between text-[9px] text-gray-600 -mt-1">
-          <span>00:00</span>
-          <span>06:00</span>
-          <span>12:00</span>
-          <span>18:00</span>
-          <span>23:59</span>
+          <span>H 0 : M 0</span>
+          <span>H 6 : M 0</span>
+          <span>H 12 : M 0</span>
+          <span>H 18 : M 0</span>
+          <span>H 23 : M 59</span>
         </div>
 
         {/* Controls Row */}
