@@ -1,6 +1,7 @@
 'use client';
 
 import { useRef, useEffect, useState, useCallback, useMemo } from 'react';
+import { CriticalAlert, InterClusterAlert, AlertLine, ALERT_RADIUS_METERS, ALERT_TYPE_CONFIG } from '@/lib/alertEngine';
 
 interface NodeData {
   node_id: string;
@@ -16,6 +17,8 @@ interface InfiniteCanvasProps {
   otherNodes: NodeData[];
   currentUserId: string;
   onNodeClick: (node: NodeData) => void;
+  criticalAlerts?: CriticalAlert[];
+  alertLines?: AlertLine[];
 }
 
 const NODE_RADIUS = 10;
@@ -29,14 +32,18 @@ const MAX_ZOOM = 10;
 const METERS_PER_DEG_LAT = 111320;
 // 1 unit on canvas = 10 meters
 const UNIT_METERS = 10;
+// 500 meters = 50 canvas units
+const ALERT_RADIUS_UNITS = ALERT_RADIUS_METERS / UNIT_METERS;
 
-function getNodeColor(node: NodeData, isOwn: boolean): string {
+function getNodeColor(node: NodeData, isOwn: boolean, isCritical: boolean): string {
+  if (isCritical) return '#ef4444';
   if (node.status === 'infected') return '#ef4444';
   if (node.status === 'offline') return '#6b7280';
   return isOwn ? '#22c55e' : '#3b82f6';
 }
 
-function getNodeGlow(node: NodeData, isOwn: boolean): string {
+function getNodeGlow(node: NodeData, isOwn: boolean, isCritical: boolean): string {
+  if (isCritical) return 'rgba(239,68,68,0.6)';
   if (node.status === 'infected') return 'rgba(239,68,68,0.4)';
   if (node.status === 'offline') return 'rgba(107,114,128,0.2)';
   return isOwn ? 'rgba(34,197,94,0.4)' : 'rgba(59,130,246,0.3)';
@@ -58,7 +65,13 @@ function latLngToXY(
   return { x, y };
 }
 
-export default function InfiniteCanvas({ ownNodes, otherNodes, onNodeClick }: InfiniteCanvasProps) {
+export default function InfiniteCanvas({
+  ownNodes,
+  otherNodes,
+  onNodeClick,
+  criticalAlerts = [],
+  alertLines = [],
+}: InfiniteCanvasProps) {
   const canvasRef = useRef<HTMLCanvasElement>(null);
   const containerRef = useRef<HTMLDivElement>(null);
 
@@ -70,6 +83,13 @@ export default function InfiniteCanvas({ ownNodes, otherNodes, onNodeClick }: In
   const hoveredNodeRef = useRef<NodeData | null>(null);
   const tooltipRef = useRef<{ node: NodeData; x: number; y: number; timer: NodeJS.Timeout | null } | null>(null);
   const [, forceUpdate] = useState(0);
+
+  // Build a set of critical node IDs for quick lookup
+  const criticalNodeIds = useMemo(() => {
+    const set = new Set<string>();
+    for (const ca of criticalAlerts) set.add(ca.sourceNodeId);
+    return set;
+  }, [criticalAlerts]);
 
   // Compute reference point: mean of own nodes
   const refPoint = useMemo(() => {
@@ -175,6 +195,7 @@ export default function InfiniteCanvas({ ownNodes, otherNodes, onNodeClick }: In
     const allNodes = [...otherNodes, ...ownNodes]; // others behind, own on top
 
     const draw = () => {
+      const now = Date.now();
       const { x: camX, y: camY, zoom } = cameraRef.current;
       const dpr = window.devicePixelRatio || 1;
       const w = canvas.width / dpr;
@@ -208,6 +229,136 @@ export default function InfiniteCanvas({ ownNodes, otherNodes, onNodeClick }: In
         ctx.stroke();
       }
 
+      // ── RED RADIANCE ZONES ─────────────────────────────────────
+      for (const ca of criticalAlerts) {
+        const pos = nodePositions.get(ca.sourceNodeId);
+        if (!pos) continue;
+
+        const sx = pos.x * zoom + camX;
+        const sy = pos.y * zoom + camY;
+        const baseRadiusPixels = ALERT_RADIUS_UNITS * zoom;
+
+        // Pulsing animation: radius oscillates ±8%
+        const pulse = 1 + 0.08 * Math.sin(now * 0.003);
+        const radiusPixels = baseRadiusPixels * pulse;
+
+        // Outer glow ring
+        const outerGlow = ctx.createRadialGradient(sx, sy, radiusPixels * 0.7, sx, sy, radiusPixels * 1.15);
+        outerGlow.addColorStop(0, 'rgba(239,68,68,0)');
+        outerGlow.addColorStop(0.6, 'rgba(239,68,68,0.03)');
+        outerGlow.addColorStop(1, 'rgba(239,68,68,0)');
+        ctx.fillStyle = outerGlow;
+        ctx.beginPath();
+        ctx.arc(sx, sy, radiusPixels * 1.15, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Main radiance gradient
+        const gradient = ctx.createRadialGradient(sx, sy, 0, sx, sy, radiusPixels);
+        gradient.addColorStop(0, 'rgba(239,68,68,0.35)');
+        gradient.addColorStop(0.3, 'rgba(239,68,68,0.20)');
+        gradient.addColorStop(0.6, 'rgba(239,68,68,0.10)');
+        gradient.addColorStop(0.85, 'rgba(239,68,68,0.04)');
+        gradient.addColorStop(1, 'rgba(239,68,68,0)');
+        ctx.fillStyle = gradient;
+        ctx.beginPath();
+        ctx.arc(sx, sy, radiusPixels, 0, Math.PI * 2);
+        ctx.fill();
+
+        // Border ring with pulsing opacity
+        const ringOpacity = 0.25 + 0.15 * Math.sin(now * 0.004);
+        ctx.strokeStyle = `rgba(239,68,68,${ringOpacity})`;
+        ctx.lineWidth = 1.5;
+        ctx.setLineDash([6, 4]);
+        ctx.beginPath();
+        ctx.arc(sx, sy, radiusPixels, 0, Math.PI * 2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+
+        // "500m" label on the ring
+        if (zoom > 0.06) {
+          ctx.font = 'bold 10px Inter, system-ui, sans-serif';
+          ctx.fillStyle = `rgba(239,68,68,${0.5 + 0.2 * Math.sin(now * 0.003)})`;
+          ctx.textAlign = 'center';
+          ctx.fillText('100m radius', sx, sy - radiusPixels - 6);
+        }
+      }
+
+      // ── GLOWING ALERT CONNECTION LINES ─────────────────────────
+      for (const line of alertLines) {
+        const srcPos = nodePositions.get(line.sourceNodeId);
+        const tgtPos = nodePositions.get(line.targetNodeId);
+        if (!srcPos || !tgtPos) continue;
+
+        const sx1 = srcPos.x * zoom + camX;
+        const sy1 = srcPos.y * zoom + camY;
+        const sx2 = tgtPos.x * zoom + camX;
+        const sy2 = tgtPos.y * zoom + camY;
+
+        // Animated flowing dash
+        const dashOffset = -(now * 0.05) % 40;
+
+        // Outer glow
+        ctx.save();
+        ctx.shadowColor = 'rgba(239,68,68,0.6)';
+        ctx.shadowBlur = 12;
+        ctx.strokeStyle = 'rgba(239,68,68,0.15)';
+        ctx.lineWidth = 6;
+        ctx.beginPath();
+        ctx.moveTo(sx1, sy1);
+        ctx.lineTo(sx2, sy2);
+        ctx.stroke();
+        ctx.restore();
+
+        // Main line with gradient
+        const lineGrad = ctx.createLinearGradient(sx1, sy1, sx2, sy2);
+        lineGrad.addColorStop(0, 'rgba(239,68,68,0.9)');
+        lineGrad.addColorStop(0.5, 'rgba(249,115,22,0.8)');
+        lineGrad.addColorStop(1, 'rgba(239,68,68,0.9)');
+        ctx.strokeStyle = lineGrad;
+        ctx.lineWidth = 2;
+        ctx.setLineDash([8, 6]);
+        ctx.lineDashOffset = dashOffset;
+        ctx.beginPath();
+        ctx.moveTo(sx1, sy1);
+        ctx.lineTo(sx2, sy2);
+        ctx.stroke();
+        ctx.setLineDash([]);
+        ctx.lineDashOffset = 0;
+
+        // Particles flowing along the line
+        const lineLen = Math.sqrt((sx2 - sx1) ** 2 + (sy2 - sy1) ** 2);
+        const numParticles = Math.max(2, Math.floor(lineLen / 60));
+        for (let i = 0; i < numParticles; i++) {
+          const t = ((now * 0.001 + i * (1 / numParticles)) % 1);
+          const px = sx1 + (sx2 - sx1) * t;
+          const py = sy1 + (sy2 - sy1) * t;
+          const particleAlpha = 0.5 + 0.5 * Math.sin(t * Math.PI);
+
+          ctx.beginPath();
+          ctx.arc(px, py, 3, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(239,68,68,${particleAlpha})`;
+          ctx.fill();
+
+          // Particle glow
+          ctx.beginPath();
+          ctx.arc(px, py, 7, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(239,68,68,${particleAlpha * 0.25})`;
+          ctx.fill();
+        }
+
+        // "ALERT" label at midpoint
+        if (zoom > 0.08) {
+          const mx = (sx1 + sx2) / 2;
+          const my = (sy1 + sy2) / 2;
+          const alertPulse = 0.6 + 0.4 * Math.sin(now * 0.005);
+
+          ctx.font = 'bold 9px Inter, system-ui, sans-serif';
+          ctx.fillStyle = `rgba(239,68,68,${alertPulse})`;
+          ctx.textAlign = 'center';
+          ctx.fillText('⚡ ALERT', mx, my - 8);
+        }
+      }
+
       // Connection lines between own nodes
       if (ownNodes.length > 1) {
         ctx.strokeStyle = 'rgba(34,197,94,0.25)';
@@ -230,6 +381,7 @@ export default function InfiniteCanvas({ ownNodes, otherNodes, onNodeClick }: In
       // Nodes
       for (const node of allNodes) {
         const isOwn = ownNodes.some((n) => n.node_id === node.node_id);
+        const isCritical = criticalNodeIds.has(node.node_id);
         const pos = nodePositions.get(node.node_id);
         if (!pos) continue;
         const sx = pos.x * zoom + camX;
@@ -239,9 +391,25 @@ export default function InfiniteCanvas({ ownNodes, otherNodes, onNodeClick }: In
         if (sx < -50 || sx > w + 50 || sy < -50 || sy > h + 50) continue;
 
         const r = isOwn ? NODE_RADIUS : NODE_RADIUS_OTHER;
-        const color = getNodeColor(node, isOwn);
-        const glow = getNodeGlow(node, isOwn);
+        const color = getNodeColor(node, isOwn, isCritical);
+        const glow = getNodeGlow(node, isOwn, isCritical);
         const isHovered = hoveredNodeRef.current?.node_id === node.node_id;
+
+        // Enhanced glow for critical nodes — pulsing red aura
+        if (isCritical) {
+          const critPulse = 1 + 0.3 * Math.sin(now * 0.006);
+          // Outer danger halo
+          ctx.beginPath();
+          ctx.arc(sx, sy, r * 4 * critPulse, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(239,68,68,${0.12 + 0.08 * Math.sin(now * 0.004)})`;
+          ctx.fill();
+
+          // Middle ring
+          ctx.beginPath();
+          ctx.arc(sx, sy, r * 2.5 * critPulse, 0, Math.PI * 2);
+          ctx.fillStyle = `rgba(239,68,68,${0.2 + 0.1 * Math.sin(now * 0.005)})`;
+          ctx.fill();
+        }
 
         // Glow
         ctx.beginPath();
@@ -256,21 +424,35 @@ export default function InfiniteCanvas({ ownNodes, otherNodes, onNodeClick }: In
         ctx.fill();
 
         if (isOwn) {
-          ctx.strokeStyle = '#1a1a1a';
-          ctx.lineWidth = 2;
+          ctx.strokeStyle = isCritical ? '#991b1b' : '#1a1a1a';
+          ctx.lineWidth = isCritical ? 3 : 2;
           ctx.stroke();
+        }
+
+        // Critical icon badge
+        if (isCritical && zoom > 0.08) {
+          const ca = criticalAlerts.find(a => a.sourceNodeId === node.node_id);
+          if (ca) {
+            const cfg = ALERT_TYPE_CONFIG[ca.type];
+            ctx.font = '14px sans-serif';
+            ctx.textAlign = 'center';
+            ctx.fillText(cfg.icon, sx, sy - r - 8);
+          }
         }
 
         // Label
         if (zoom > 0.1) {
           ctx.font = `${isHovered ? 'bold ' : ''}11px Inter, system-ui, sans-serif`;
-          ctx.fillStyle = isHovered ? '#000000' : 'rgba(0,0,0,0.5)';
+          ctx.fillStyle = isCritical ? '#dc2626' : (isHovered ? '#000000' : 'rgba(0,0,0,0.5)');
           ctx.textAlign = 'center';
           ctx.fillText(node.node_id.substring(0, 8), sx, sy + r + 14);
           if (isHovered) {
             ctx.font = '10px Inter, system-ui, sans-serif';
-            ctx.fillStyle = 'rgba(0,0,0,0.35)';
-            ctx.fillText(isOwn ? 'click to view' : 'discovery only', sx, sy + r + 28);
+            ctx.fillStyle = isCritical ? 'rgba(220,38,38,0.7)' : 'rgba(0,0,0,0.35)';
+            ctx.fillText(
+              isCritical ? '⚠ CRITICAL ALERT' : (isOwn ? 'click to view' : 'discovery only'),
+              sx, sy + r + 28
+            );
           }
         }
       }
@@ -335,7 +517,7 @@ export default function InfiniteCanvas({ ownNodes, otherNodes, onNodeClick }: In
 
     animId = requestAnimationFrame(draw);
     return () => cancelAnimationFrame(animId);
-  }, [ownNodes, otherNodes, nodePositions]);
+  }, [ownNodes, otherNodes, nodePositions, criticalAlerts, alertLines, criticalNodeIds]);
 
   // Event handlers
   const getNodeAtScreen = useCallback(
@@ -506,6 +688,18 @@ export default function InfiniteCanvas({ ownNodes, otherNodes, onNodeClick }: In
               <span className="text-[10px] text-gray-600">{label}</span>
             </div>
           ))}
+          {criticalAlerts.length > 0 && (
+            <>
+              <div className="border-t border-gray-200 my-1" />
+              <div className="flex items-center gap-2">
+                <div
+                  className="w-2.5 h-2.5 rounded-full animate-pulse"
+                  style={{ backgroundColor: '#ef4444', boxShadow: '0 0 10px rgba(239,68,68,0.8)' }}
+                />
+                <span className="text-[10px] text-red-500 font-semibold">Critical Zone (100m)</span>
+              </div>
+            </>
+          )}
         </div>
       </div>
 

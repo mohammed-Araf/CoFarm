@@ -71,7 +71,7 @@ export default function NewNodePage() {
       if (!user) throw new Error('Not authenticated');
 
       const nodeRecords = nodes.map((n) => ({
-        node_id: n.node_id || crypto.randomUUID(),
+        node_id: n.node_id || ((typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`),
         latitude: parseFloat(n.latitude),
         longitude: parseFloat(n.longitude),
         elevation_m: n.elevation_m ? parseFloat(n.elevation_m) : null,

@@ -3,7 +3,19 @@
 import { useEffect, useState, useCallback, useRef } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
-import { SensorReading, Alert, checkForAlerts } from '@/lib/simulator';
+import { SensorReading, Alert, checkForAlerts, generateTimeBasedReading } from '@/lib/simulator';
+import {
+  CriticalAlert,
+  InterClusterAlert,
+  AlertLine,
+  CriticalAlertType,
+  evaluateCriticalAlert,
+  findNodesWithFallback,
+  deduplicateClusterAlerts,
+  getTestOverrideReading,
+  buildAlertLines,
+  NodeData as AlertNodeData,
+} from '@/lib/alertEngine';
 import AlertsPanel from './components/AlertsPanel';
 import NodeDiscoveryPanel from './components/NodeDiscoveryPanel';
 import InfiniteCanvas from './components/InfiniteCanvas';
@@ -37,6 +49,13 @@ export default function DashboardPage() {
   // Database sensor data cache for the selected node
   const [dbSensorData, setDbSensorData] = useState<SensorReading[]>([]);
   const [sensorDataLoading, setSensorDataLoading] = useState(false);
+
+  // ── Critical Alert System ──────────────────────────────────────
+  const [criticalAlerts, setCriticalAlerts] = useState<CriticalAlert[]>([]);
+  const [interClusterAlerts, setInterClusterAlerts] = useState<InterClusterAlert[]>([]);
+  const [alertLines, setAlertLines] = useState<AlertLine[]>([]);
+  const [testTriggerType, setTestTriggerType] = useState<CriticalAlertType | null>(null);
+  const [testTargetNodeId, setTestTargetNodeId] = useState<string | null>(null);
 
   // Prevent page-level zoom (trackpad pinch)
   useEffect(() => {
@@ -181,6 +200,194 @@ export default function DashboardPage() {
     }
   }, [selectedNode, simMinutes, dbSensorData, sensorDataLoading]);
 
+  // ── Critical Alert Evaluation ────────────────────────────────
+  // When test trigger is active: evaluate locally + write to Supabase `alerts` table.
+  // Also subscribe to Supabase Realtime to receive alerts from OTHER users.
+
+  // Write to Supabase when local test trigger fires
+  useEffect(() => {
+    if (ownNodes.length === 0 || !user) return;
+
+    if (!testTriggerType) {
+      // Clear local alerts
+      setCriticalAlerts((prev) => prev.filter(a => a.sourceClusterId !== user.id));
+      setInterClusterAlerts((prev) => prev.filter(a => a.sourceClusterId !== user.id));
+      // Mark our critical alerts as inactive (triggers UPDATE event for receivers)
+      supabase
+        .from('alerts')
+        .update({ is_active: false })
+        .eq('source_cluster_id', user.id)
+        .eq('is_critical', true)
+        .eq('is_active', true)
+        .then(() => {});
+      return;
+    }
+
+    const allNodes = [...ownNodes, ...otherNodes];
+    const testNode = ownNodes.find(n => n.node_id === testTargetNodeId) || ownNodes[0];
+    const baseReading = generateTimeBasedReading(testNode.node_id, simMinutes);
+    const reading = getTestOverrideReading(testTriggerType, baseReading);
+
+    const critical = evaluateCriticalAlert(reading, testNode as AlertNodeData);
+    if (critical) {
+      // Update local state
+      setCriticalAlerts((prev) => {
+        const filtered = prev.filter(a => a.sourceClusterId !== user.id);
+        return [...filtered, critical];
+      });
+
+      // Sender: only show red node glow, don't compute connection lines
+      // (connection lines are only for the receiver side)
+
+      // Persist to Supabase alerts table
+      // First deactivate any existing, then insert new
+      supabase
+        .from('alerts')
+        .update({ is_active: false })
+        .eq('source_cluster_id', critical.sourceClusterId)
+        .eq('is_critical', true)
+        .then(() => {
+          supabase
+            .from('alerts')
+            .insert({
+              node_id: critical.sourceNodeId,
+              source_cluster_id: critical.sourceClusterId,
+              type: critical.type,
+              severity: 'critical',
+              message: critical.message,
+              is_critical: true,
+              radius_meters: 100,
+              is_active: true,
+            })
+            .then(({ error }) => {
+              if (error) console.error('Error writing critical alert:', error);
+            });
+        });
+    }
+  }, [ownNodes, otherNodes, simMinutes, testTriggerType, testTargetNodeId, user]);
+
+  // Subscribe to Supabase Realtime for critical alerts from OTHER users
+  useEffect(() => {
+    if (!user || ownNodes.length === 0) return;
+
+    const allNodes = [...ownNodes, ...otherNodes];
+
+    // Fetch existing active critical alerts on mount
+    const fetchExisting = async () => {
+      const { data, error } = await supabase
+        .from('alerts')
+        .select('*')
+        .eq('is_critical', true)
+        .eq('is_active', true)
+        .neq('source_cluster_id', user.id);
+
+      if (error) {
+        console.error('Error fetching critical alerts:', error);
+        return;
+      }
+
+      if (data && data.length > 0) {
+        const remoteCriticals: CriticalAlert[] = [];
+        const remoteInterCluster: InterClusterAlert[] = [];
+
+        for (const row of data) {
+          const sourceNode = allNodes.find(n => n.node_id === row.node_id);
+          if (!sourceNode) continue;
+
+          const ca: CriticalAlert = {
+            id: row.id,
+            sourceNodeId: row.node_id,
+            sourceClusterId: row.source_cluster_id,
+            type: row.type,
+            message: row.message || '',
+            timestamp: row.created_at,
+            lat: sourceNode.latitude,
+            lng: sourceNode.longitude,
+          };
+          remoteCriticals.push(ca);
+
+          const nearby = findNodesWithFallback(sourceNode as AlertNodeData, allNodes as AlertNodeData[]);
+          const deduped = deduplicateClusterAlerts(ca, nearby as AlertNodeData[]);
+          remoteInterCluster.push(...deduped);
+        }
+
+        setCriticalAlerts(prev => {
+          const local = prev.filter(a => a.sourceClusterId === user.id);
+          return [...local, ...remoteCriticals];
+        });
+        setInterClusterAlerts(prev => {
+          const local = prev.filter(a => a.sourceClusterId === user.id);
+          return [...local, ...remoteInterCluster];
+        });
+      }
+    };
+
+    fetchExisting();
+
+    // Subscribe to real-time changes on the alerts table (critical only)
+    const channel = supabase
+      .channel('critical-alerts-realtime')
+      .on(
+        'postgres_changes',
+        { event: 'INSERT', schema: 'public', table: 'alerts', filter: 'is_critical=eq.true' },
+        (payload) => {
+          const row = payload.new as Record<string, string | number | boolean>;
+          if (row.source_cluster_id === user.id) return;
+
+          const sourceNode = allNodes.find(n => n.node_id === row.node_id);
+          if (!sourceNode) return;
+
+          const ca: CriticalAlert = {
+            id: row.id as string,
+            sourceNodeId: row.node_id as string,
+            sourceClusterId: row.source_cluster_id as string,
+            type: row.type as CriticalAlertType,
+            message: (row.message || '') as string,
+            timestamp: (row.created_at || new Date().toISOString()) as string,
+            lat: sourceNode.latitude,
+            lng: sourceNode.longitude,
+          };
+
+          setCriticalAlerts(prev => [...prev.filter(a => a.id !== ca.id), ca]);
+
+          const nearby = findNodesWithFallback(sourceNode as AlertNodeData, allNodes as AlertNodeData[]);
+          const deduped = deduplicateClusterAlerts(ca, nearby as AlertNodeData[]);
+          setInterClusterAlerts(prev => {
+            const filtered = prev.filter(a => a.sourceClusterId !== ca.sourceClusterId);
+            return [...filtered, ...deduped];
+          });
+        }
+      )
+      .on(
+        'postgres_changes',
+        { event: 'UPDATE', schema: 'public', table: 'alerts', filter: 'is_critical=eq.true' },
+        (payload) => {
+          const row = payload.new as Record<string, string | number | boolean>;
+          if (row.source_cluster_id === user.id) return;
+
+          // If alert was deactivated, remove from state
+          if (row.is_active === false) {
+            setCriticalAlerts(prev => prev.filter(a =>
+              a.sourceClusterId !== (row.source_cluster_id as string)
+            ));
+            setInterClusterAlerts(prev => prev.filter(a =>
+              a.sourceClusterId !== (row.source_cluster_id as string)
+            ));
+          }
+        }
+      )
+      .subscribe();
+
+    return () => {
+      supabase.removeChannel(channel);
+    };
+  }, [user, ownNodes, otherNodes]);
+
+  // Rebuild alert lines whenever critical/inter-cluster alerts change
+  useEffect(() => {
+    setAlertLines(buildAlertLines(criticalAlerts, interClusterAlerts));
+  }, [criticalAlerts, interClusterAlerts]);
+
   const handleNodeClick = (node: NodeData) => {
     // Only allow detail view for own nodes
     if (ownNodes.some((n) => n.node_id === node.node_id)) {
@@ -207,6 +414,18 @@ export default function DashboardPage() {
 
   const handleSeek = useCallback((minutes: number) => {
     setSimMinutes(Math.floor(Math.max(0, Math.min(1439, minutes))));
+  }, []);
+
+  const handleTestTrigger = useCallback((type: CriticalAlertType) => {
+    setTestTriggerType(type);
+  }, []);
+
+  const handleClearTestTrigger = useCallback(() => {
+    setTestTriggerType(null);
+  }, []);
+
+  const handleTestNodeChange = useCallback((nodeId: string) => {
+    setTestTargetNodeId(nodeId);
   }, []);
 
   if (loading) {
@@ -240,17 +459,33 @@ export default function DashboardPage() {
           <span className="text-gray-500 text-xs">
             {ownNodes.length} node{ownNodes.length !== 1 ? 's' : ''} registered
           </span>
+          {criticalAlerts.length > 0 && (
+            <>
+              <span className="text-gray-600 text-xs">|</span>
+              <span className="flex items-center gap-1.5 px-2 py-0.5 bg-red-500/15 border border-red-500/30 rounded-full animate-pulse">
+                <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
+                <span className="text-[10px] text-red-400 font-semibold uppercase tracking-wider">
+                  {criticalAlerts.length} Critical Alert{criticalAlerts.length !== 1 ? 's' : ''}
+                </span>
+              </span>
+            </>
+          )}
         </div>
 
         <div className="flex items-center gap-3">
           <button
-            onClick={() => router.push('/nodes/new')}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800/60 border border-gray-700/50 rounded-lg text-gray-400 hover:border-green-500/50 hover:text-green-400 transition-all text-xs cursor-pointer"
+            onClick={() => router.push('/magic-stick')}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800/60 border border-gray-700/50 rounded-lg text-gray-400 hover:border-purple-500/50 hover:text-purple-400 transition-all text-xs cursor-pointer"
           >
-            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
-              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
-            </svg>
-            Add Node
+            <span className="text-sm">🪄</span>
+            Magic Stick
+          </button>
+          <button
+            onClick={() => router.push('/settings')}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800/60 border border-gray-700/50 rounded-lg text-gray-400 hover:border-orange-500/50 hover:text-orange-400 transition-all text-xs cursor-pointer"
+          >
+            <span className="text-sm">⚙️</span>
+            Settings
           </button>
           <div className="flex items-center gap-1.5 px-3 py-1 bg-green-500/10 border border-green-500/20 rounded-full">
             <div className={`w-1.5 h-1.5 rounded-full ${isPlaying ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`} />
@@ -273,7 +508,16 @@ export default function DashboardPage() {
         <div className="w-72 border-r border-gray-800/80 bg-gray-900/40 backdrop-blur-xl flex-shrink-0 overflow-hidden">
           <AlertsPanel
             alerts={alerts}
+            interClusterAlerts={interClusterAlerts}
+            criticalAlerts={criticalAlerts}
+            ownNodes={ownNodes}
+            testTargetNodeId={testTargetNodeId || (ownNodes[0]?.node_id ?? '')}
+            userId={user?.id || ''}
             onAddNode={() => router.push('/nodes/new')}
+            onTestTrigger={handleTestTrigger}
+            onClearTestTrigger={handleClearTestTrigger}
+            onTestNodeChange={handleTestNodeChange}
+            isTestActive={testTriggerType !== null}
           />
         </div>
 
@@ -286,6 +530,8 @@ export default function DashboardPage() {
                 otherNodes={otherNodes}
                 currentUserId={user?.id || ''}
                 onNodeClick={handleNodeClick}
+                criticalAlerts={criticalAlerts}
+                alertLines={alertLines}
               />
             </div>
           ) : (

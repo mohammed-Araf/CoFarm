@@ -1,36 +1,142 @@
-This is a [Next.js](https://nextjs.org) project bootstrapped with [`create-next-app`](https://nextjs.org/docs/app/api-reference/cli/create-next-app).
+# C0Farm — Distributed Farm Intelligence Platform
 
-## Getting Started
+A privacy-preserving, real-time agricultural monitoring system that enables collaborative farm intelligence through sensor networks and cross-cluster alerting.
 
-First, run the development server:
+## 🚀 Quick Start
 
 ```bash
+npm install
 npm run dev
-# or
-yarn dev
-# or
-pnpm dev
-# or
-bun dev
 ```
 
-Open [http://localhost:3000](http://localhost:3000) with your browser to see the result.
+Open [http://localhost:3000](http://localhost:3000) in your browser.
 
-You can start editing the page by modifying `app/page.tsx`. The page auto-updates as you edit the file.
+### Environment Variables
 
-This project uses [`next/font`](https://nextjs.org/docs/app/building-your-application/optimizing/fonts) to automatically optimize and load [Geist](https://vercel.com/font), a new font family for Vercel.
+Create a `.env.local` file:
 
-## Learn More
+```env
+NEXT_PUBLIC_SUPABASE_URL=your_supabase_url
+NEXT_PUBLIC_SUPABASE_ANON_KEY=your_supabase_anon_key
+```
 
-To learn more about Next.js, take a look at the following resources:
+## 📁 Project Structure
 
-- [Next.js Documentation](https://nextjs.org/docs) - learn about Next.js features and API.
-- [Learn Next.js](https://nextjs.org/learn) - an interactive Next.js tutorial.
+```
+src/
+├── app/
+│   ├── dashboard/           # Main dashboard with infinite canvas
+│   │   ├── page.tsx         # Dashboard orchestration & state
+│   │   └── components/
+│   │       ├── InfiniteCanvas.tsx  # Node visualization & alert zones
+│   │       ├── AlertsPanel.tsx     # Alert list & test triggers
+│   │       └── NodeMap.tsx         # Node discovery panel
+│   ├── magic-stick/         # 🪄 Sensor stick product visualization
+│   ├── settings/            # ⚙️ Alert threshold configuration viewer
+│   ├── nodes/new/           # Node registration (manual + CSV upload)
+│   └── login/               # Authentication
+├── lib/
+│   ├── alertConfig.ts       # ⚙️ FINE-TUNE TRIGGERS HERE
+│   ├── alertEngine.ts       # Alert evaluation logic
+│   ├── simulator.ts         # Synthetic sensor data generator
+│   └── supabase.ts          # Supabase client
+└── middleware.ts             # Auth middleware
+```
 
-You can check out [the Next.js GitHub repository](https://github.com/vercel/next.js) - your feedback and contributions are welcome!
+## ⚙️ Fine-Tuning Alert Triggers
 
-## Deploy on Vercel
+All alert thresholds are centralized in a single file:
 
-The easiest way to deploy your Next.js app is to use the [Vercel Platform](https://vercel.com/new?utm_medium=default-template&filter=next.js&utm_source=create-next-app&utm_campaign=create-next-app-readme) from the creators of Next.js.
+```
+src/lib/alertConfig.ts
+```
 
-Check out our [Next.js deployment documentation](https://nextjs.org/docs/app/building-your-application/deploying) for more details.
+### Current Thresholds
+
+| Alert Type | Conditions | Default Values |
+|---|---|---|
+| 🐛 Pest Outbreak | Air temp AND humidity | > 40°C AND > 85% |
+| 🏜️ Severe Drought | Soil moisture AND water tension | < 0.08 m³/m³ AND > 60 kPa |
+| ❄️ Frost Emergency | Air temperature | < 1°C |
+| ☣️ Chemical Hazard | TVOC AND soil pH | > 450 µg/m³ AND < 4.8 pH |
+
+### How to Change
+
+1. Open `src/lib/alertConfig.ts`
+2. Edit the values in `ALERT_THRESHOLDS`:
+
+```typescript
+export const ALERT_THRESHOLDS = {
+  pest_outbreak: {
+    air_temperature_min: 40,       // Lower this to trigger earlier
+    relative_humidity_min: 85,     // Lower this for more sensitivity
+  },
+  severe_drought: {
+    soil_moisture_max: 0.08,       // Raise this for earlier drought alerts
+    soil_water_tension_min: 60,    // Lower this for more sensitivity
+  },
+  frost_emergency: {
+    air_temperature_max: 1,        // Raise to 2 or 3 for earlier frost alerts
+  },
+  chemical_hazard: {
+    tvoc_min: 450,                 // Lower for more sensitivity
+    soil_ph_max: 4.8,             // Raise for more sensitivity
+  },
+};
+```
+
+3. Save the file and refresh the dashboard.
+
+You can also view current thresholds in the app: **Dashboard → ⚙️ Settings**.
+
+### Alert Radius
+
+```typescript
+export const RADIUS_CONFIG = {
+  primary_radius_meters: 100,    // Primary alert zone
+  fallback_radius_meters: 300,   // Fallback if no nodes in primary zone
+};
+```
+
+## 🪄 Magic Stick
+
+The **Magic Stick** page (`/magic-stick`) is an interactive product visualization showing the C0Farm sensor node — a solar-powered stick with 16 environmental sensors. Click any sensor to see what it measures and why it matters for farming.
+
+Access: **Dashboard → 🪄 Magic Stick**
+
+## 🔔 Real-Time Alert System
+
+The platform uses **Supabase Realtime** for cross-client alert delivery:
+
+- When a critical condition is detected, the alert is written to the `alerts` table
+- All connected clients subscribe to changes via Supabase Realtime
+- **Sender** sees a red glowing node + "Your Farm Alert" card
+- **Receiver** sees the red radiance zone, glowing connection lines, and "External Cluster Alert" card
+- When sender clears the alert, it disappears from all clients in real-time
+
+### Database Setup
+
+Run the migration in your Supabase SQL Editor:
+
+```sql
+-- See supabase/migrate_critical_alerts.sql
+```
+
+## 🌾 Features
+
+- **Infinite Canvas**: Pan/zoom node visualization with real-time sensor data
+- **16 Sensor Types**: Soil, atmospheric, and weather monitoring
+- **Critical Alerts**: 4 alert types with configurable thresholds
+- **Inter-Cluster Alerts**: Cross-farm notifications within 100m (300m fallback)
+- **Real-Time Sync**: Supabase Realtime for live multi-client updates
+- **Test Triggers**: Simulate any alert type for testing
+- **Node Registration**: Manual or CSV batch upload
+- **Simulation Playback**: Time-based sensor data with play/pause/speed controls
+
+## 🛠 Tech Stack
+
+- **Framework**: Next.js 14 (App Router)
+- **Database**: Supabase (PostgreSQL + Realtime + Auth)
+- **Styling**: Vanilla CSS + Tailwind-free utility classes
+- **Language**: TypeScript
+- **Rendering**: HTML5 Canvas for node visualization
