@@ -151,7 +151,7 @@ Run the migration in your Supabase SQL Editor:
 
 - **Framework**: Next.js 14 (App Router)
 - **Database**: Supabase (PostgreSQL + Realtime + Auth)
-- **AI Integration**: Google Gemini API (2.0 Flash)
+- **AI Integration**: Google Gemini API (latest Flash)
 - **Styling**: Vanilla CSS + Tailwind-free utility classes
 - **Language**: TypeScript
 - **Rendering**: HTML5 Canvas for node visualization
