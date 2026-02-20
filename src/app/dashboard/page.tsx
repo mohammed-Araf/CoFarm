@@ -1,9 +1,11 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
-import { SensorReading, Alert, checkForAlerts } from '@/lib/simulator';
+import { SensorReading, Alert, checkForAlerts, generateTimeBasedReading, generateInfectionAlert, generateNeighborWarningAlert } from '@/lib/simulator';
+import { monitorNodeInfection, infectionStateManager } from '@/lib/infection';
+import { calculateDistanceMatrix } from '@/lib/distance';
 import AlertsPanel from './components/AlertsPanel';
 import NodeDiscoveryPanel from './components/NodeDiscoveryPanel';
 import InfiniteCanvas from './components/InfiniteCanvas';
@@ -37,6 +39,37 @@ export default function DashboardPage() {
   // Database sensor data cache for the selected node
   const [dbSensorData, setDbSensorData] = useState<SensorReading[]>([]);
   const [sensorDataLoading, setSensorDataLoading] = useState(false);
+
+  // Global sensor data cache for ALL nodes
+  const [allNodesData, setAllNodesData] = useState<Map<string, SensorReading[]>>(new Map());
+  const [dataLoadingProgress, setDataLoadingProgress] = useState<number>(0);
+
+  // Distance matrix and reference point
+  const { refLat, refLng, distanceMatrix } = useMemo(() => {
+    if (ownNodes.length === 0) {
+      return { refLat: 0, refLng: 0, distanceMatrix: new Map() };
+    }
+
+    // Calculate reference point (mean of own nodes)
+    const sumLat = ownNodes.reduce((sum, n) => sum + n.latitude, 0);
+    const sumLng = ownNodes.reduce((sum, n) => sum + n.longitude, 0);
+    const refLat = sumLat / ownNodes.length;
+    const refLng = sumLng / ownNodes.length;
+
+    // Calculate distance matrix for all nodes
+    const allNodes = [...ownNodes, ...otherNodes];
+    const distanceMatrix = calculateDistanceMatrix(
+      allNodes.map(n => ({
+        node_id: n.node_id,
+        latitude: n.latitude,
+        longitude: n.longitude,
+      })),
+      refLat,
+      refLng
+    );
+
+    return { refLat, refLng, distanceMatrix };
+  }, [ownNodes, otherNodes]);
 
   // Prevent page-level zoom (trackpad pinch)
   useEffect(() => {
@@ -93,6 +126,47 @@ export default function DashboardPage() {
     fetchNodes();
   }, [user, router]);
 
+  // Fetch sensor data for ALL nodes (own + others) on dashboard load
+  useEffect(() => {
+    if (!user || ownNodes.length === 0) return;
+
+    const fetchAllNodesSensorData = async () => {
+      const allNodes = [...ownNodes, ...otherNodes];
+      const dataMap = new Map<string, SensorReading[]>();
+
+      console.log(`[Global Data Fetch] Loading sensor data for ${allNodes.length} nodes...`);
+
+      // Fetch in parallel batches of 10 to avoid overwhelming the connection
+      const batchSize = 10;
+      for (let i = 0; i < allNodes.length; i += batchSize) {
+        const batch = allNodes.slice(i, i + batchSize);
+        const promises = batch.map(node =>
+          supabase
+            .from('sensor_data')
+            .select('*')
+            .eq('node_id', node.node_id)
+            .order('timestamp', { ascending: true })
+            .range(0, 1439)
+        );
+
+        const results = await Promise.all(promises);
+        results.forEach((result, idx) => {
+          if (result.data) {
+            dataMap.set(batch[idx].node_id, result.data as SensorReading[]);
+            console.log(`[Global Data Fetch] Loaded ${result.data.length} readings for node ${batch[idx].node_id}`);
+          }
+        });
+
+        setDataLoadingProgress(Math.min(100, ((i + batchSize) / allNodes.length) * 100));
+      }
+
+      setAllNodesData(dataMap);
+      console.log(`[Global Data Fetch] Complete! Cached data for ${dataMap.size} nodes`);
+    };
+
+    fetchAllNodesSensorData();
+  }, [user, ownNodes, otherNodes]);
+
   // Simulation timer loop
   useEffect(() => {
     if (simIntervalRef.current) {
@@ -130,12 +204,14 @@ export default function DashboardPage() {
         .from('sensor_data')
         .select('*')
         .eq('node_id', selectedNode.node_id)
-        .order('timestamp', { ascending: true });
+        .order('timestamp', { ascending: true })
+        .range(0, 1439); // Explicitly request rows 0-1439 (1440 total rows)
 
       if (error) {
         console.error('Error fetching sensor data:', error);
         setDbSensorData([]);
       } else {
+        console.log(`[Data Fetch] Retrieved ${data?.length || 0} rows from database`);
         setDbSensorData((data as SensorReading[]) || []);
       }
       setSensorDataLoading(false);
@@ -144,6 +220,155 @@ export default function DashboardPage() {
     fetchSensorData();
   }, [selectedNode]);
 
+  // Global infection monitoring - check ALL nodes at current simMinutes
+  useEffect(() => {
+    if (allNodesData.size === 0 || distanceMatrix.size === 0) return;
+
+    const allNodes = [...ownNodes, ...otherNodes];
+    const updates: { nodeId: string; newStatus: string }[] = [];
+    const newAlerts: Alert[] = [];
+
+    // Generate current simulation timestamp
+    const hh = Math.floor(simMinutes / 60).toString().padStart(2, '0');
+    const mm = Math.floor(simMinutes % 60).toString().padStart(2, '0');
+    const currentDate = new Date().toISOString().split('T')[0];
+    const currentSimTime = `${currentDate}T${hh}:${mm}:00.000Z`;
+
+    // First pass: Check each node for infection
+    const infectedNodes = new Set<string>();
+    const newlyInfectedNodes = new Map<string, any>(); // nodeId -> triggers
+
+    for (const node of allNodes) {
+      const nodeData = allNodesData.get(node.node_id);
+      if (!nodeData || nodeData.length === 0) continue;
+
+      // Find reading at simMinutes (same matching logic as selected node)
+      let bestIdx = 0;
+      let bestDiff = Infinity;
+
+      for (let i = 0; i < nodeData.length; i++) {
+        const ts = new Date(nodeData[i].timestamp);
+        const rowMinutes = ts.getUTCHours() * 60 + ts.getUTCMinutes();
+        const diff = Math.abs(rowMinutes - simMinutes);
+        const wrapDiff = 1440 - diff;
+        const minDiff = Math.min(diff, wrapDiff);
+        if (minDiff < bestDiff) {
+          bestDiff = minDiff;
+          bestIdx = i;
+        }
+      }
+
+      const reading = {
+        ...nodeData[bestIdx],
+        timeMinute: simMinutes,
+      };
+
+      // Monitor infection for this node
+      const wasInfected = node.status === 'infected';
+      const newStatus = monitorNodeInfection(node.node_id, reading, currentSimTime);
+      const isNowInfected = newStatus === 'infected';
+
+      if (isNowInfected) {
+        infectedNodes.add(node.node_id);
+
+        // Track newly infected nodes (just became infected)
+        if (!wasInfected) {
+          const infectionState = infectionStateManager.getState(node.node_id);
+          newlyInfectedNodes.set(node.node_id, infectionState.triggers);
+
+          // Generate infection alert for this node
+          const infectionAlert = generateInfectionAlert(node.node_id, infectionState.triggers);
+          newAlerts.push(infectionAlert);
+        }
+      }
+
+      if (newStatus !== node.status) {
+        updates.push({ nodeId: node.node_id, newStatus });
+      }
+    }
+
+    // Second pass: Check for at-risk nodes (nearest neighbor is infected)
+    for (const node of allNodes) {
+      // Skip if already infected
+      if (infectedNodes.has(node.node_id)) continue;
+
+      // Get distances to all other nodes
+      const distances = distanceMatrix.get(node.node_id);
+      if (!distances) continue;
+
+      // Find nearest neighbor
+      let nearestDistance = Infinity;
+      let nearestNodeId = '';
+      distances.forEach((distance: number, otherNodeId: string) => {
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearestNodeId = otherNodeId;
+        }
+      });
+
+      // Check if nearest neighbor is infected
+      const nearestIsInfected = infectedNodes.has(nearestNodeId);
+      const nearestJustBecameInfected = newlyInfectedNodes.has(nearestNodeId);
+      const currentlyAtRisk = node.status === 'at_risk';
+
+      if (nearestIsInfected && !currentlyAtRisk) {
+        // Set to at_risk
+        infectionStateManager.setAtRisk(node.node_id, nearestNodeId, nearestDistance);
+        updates.push({ nodeId: node.node_id, newStatus: 'at_risk' });
+
+        // Generate warning alert if the neighbor just became infected
+        if (nearestJustBecameInfected) {
+          const triggers = newlyInfectedNodes.get(nearestNodeId);
+          const primaryTriggerType = triggers && triggers.length > 0 ? triggers[0].type : 'anomaly';
+          const warningAlert = generateNeighborWarningAlert(
+            node.node_id,
+            nearestNodeId,
+            nearestDistance,
+            primaryTriggerType
+          );
+          newAlerts.push(warningAlert);
+        }
+      } else if (!nearestIsInfected && currentlyAtRisk) {
+        // Clear at_risk status
+        infectionStateManager.setOnline(node.node_id);
+        updates.push({ nodeId: node.node_id, newStatus: 'online' });
+      }
+    }
+
+    // Batch update all nodes that changed status
+    if (updates.length > 0) {
+      setOwnNodes(prev =>
+        prev.map(node => {
+          const update = updates.find(u => u.nodeId === node.node_id);
+          return update ? { ...node, status: update.newStatus } : node;
+        })
+      );
+
+      setOtherNodes(prev =>
+        prev.map(node => {
+          const update = updates.find(u => u.nodeId === node.node_id);
+          return update ? { ...node, status: update.newStatus } : node;
+        })
+      );
+
+      // Update selectedNode if it changed
+      if (selectedNode) {
+        const selectedUpdate = updates.find(u => u.nodeId === selectedNode.node_id);
+        if (selectedUpdate) {
+          setSelectedNode(prev => prev ? { ...prev, status: selectedUpdate.newStatus } : prev);
+        }
+      }
+    }
+
+    // Add new alerts to the alerts feed
+    if (newAlerts.length > 0) {
+      setAlerts(prev => {
+        const updated = [...newAlerts, ...prev];
+        return updated.slice(0, 50); // Keep last 50 alerts
+      });
+    }
+  }, [simMinutes, allNodesData, ownNodes, otherNodes, selectedNode, distanceMatrix]);
+
   // Map simMinutes to the closest sensor_data row from DB
   useEffect(() => {
     if (!selectedNode || dbSensorData.length === 0) {
@@ -151,13 +376,15 @@ export default function DashboardPage() {
       return;
     }
 
+    console.log(`[Timestamp Sync] simMinutes: ${simMinutes}, dbSensorData count: ${dbSensorData.length}`);
+
     // Find the closest reading by comparing simMinutes to the timestamp's hour:minute
     let bestIdx = 0;
     let bestDiff = Infinity;
 
     for (let i = 0; i < dbSensorData.length; i++) {
       const ts = new Date(dbSensorData[i].timestamp);
-      const rowMinutes = ts.getHours() * 60 + ts.getMinutes();
+      const rowMinutes = ts.getUTCHours() * 60 + ts.getUTCMinutes();
       const diff = Math.abs(rowMinutes - simMinutes);
       // Also consider wrapping around midnight
       const wrapDiff = 1440 - diff;
@@ -169,6 +396,11 @@ export default function DashboardPage() {
     }
 
     const reading = dbSensorData[bestIdx];
+    const matchedTs = new Date(reading.timestamp);
+    const matchedMinutes = matchedTs.getUTCHours() * 60 + matchedTs.getUTCMinutes();
+    console.log(`[Timestamp Sync] Matched index ${bestIdx}: sim=${simMinutes}min (${Math.floor(simMinutes/60)}:${simMinutes%60}), db=${matchedMinutes}min (${matchedTs.getUTCHours()}:${matchedTs.getUTCMinutes()}), diff=${bestDiff}min`);
+    console.log(`[Timestamp Sync] Reading tVOC: ${reading.tvoc_ugm3}, timestamp: ${reading.timestamp}`);
+
     setSensorReading(reading);
 
     // Generate alerts from reading
@@ -209,15 +441,25 @@ export default function DashboardPage() {
     setSimMinutes(Math.floor(Math.max(0, Math.min(1439, minutes))));
   }, []);
 
-  if (loading) {
+  if (loading || dataLoadingProgress < 100) {
     return (
       <div className="gradient-bg min-h-screen flex items-center justify-center">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-col items-center gap-3">
           <svg className="animate-spin h-6 w-6 text-green-500" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
-          <span className="text-gray-400">Loading dashboard...</span>
+          <span className="text-gray-400">
+            {loading ? 'Loading dashboard...' : 'Loading network sensor data...'}
+          </span>
+          {dataLoadingProgress > 0 && dataLoadingProgress < 100 && (
+            <div className="w-64 h-2 bg-gray-800 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-green-500 transition-all duration-300"
+                style={{ width: `${dataLoadingProgress}%` }}
+              />
+            </div>
+          )}
         </div>
       </div>
     );
@@ -293,7 +535,10 @@ export default function DashboardPage() {
               node={selectedNode}
               sensorData={sensorReading}
               currentSimMinute={simMinutes}
+              dbSensorData={dbSensorData}
               onBackToMap={handleBackToCanvas}
+              distanceMatrix={distanceMatrix}
+              allNodes={[...ownNodes, ...otherNodes]}
             />
           )}
         </div>

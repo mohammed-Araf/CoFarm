@@ -31,15 +31,17 @@ const METERS_PER_DEG_LAT = 111320;
 const UNIT_METERS = 10;
 
 function getNodeColor(node: NodeData, isOwn: boolean): string {
-  if (node.status === 'infected') return '#ef4444';
-  if (node.status === 'offline') return '#6b7280';
-  return isOwn ? '#22c55e' : '#3b82f6';
+  if (node.status === 'infected') return '#ef4444'; // Red
+  if (node.status === 'at_risk') return '#eab308'; // Yellow
+  if (node.status === 'offline') return '#6b7280'; // Gray
+  return isOwn ? '#22c55e' : '#3b82f6'; // Green or Blue
 }
 
 function getNodeGlow(node: NodeData, isOwn: boolean): string {
-  if (node.status === 'infected') return 'rgba(239,68,68,0.4)';
-  if (node.status === 'offline') return 'rgba(107,114,128,0.2)';
-  return isOwn ? 'rgba(34,197,94,0.4)' : 'rgba(59,130,246,0.3)';
+  if (node.status === 'infected') return 'rgba(239,68,68,0.4)'; // Red glow
+  if (node.status === 'at_risk') return 'rgba(234,179,8,0.4)'; // Yellow glow
+  if (node.status === 'offline') return 'rgba(107,114,128,0.2)'; // Gray glow
+  return isOwn ? 'rgba(34,197,94,0.4)' : 'rgba(59,130,246,0.3)'; // Green or Blue glow
 }
 
 /**

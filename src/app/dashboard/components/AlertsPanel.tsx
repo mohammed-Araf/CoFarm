@@ -1,6 +1,7 @@
 'use client';
 
 import { Alert } from '@/lib/simulator';
+import { formatDistance } from '@/lib/distance';
 
 interface AlertsPanelProps {
   alerts: Alert[];
@@ -49,25 +50,45 @@ export default function AlertsPanel({ alerts, onAddNode }: AlertsPanelProps) {
         ) : (
           alerts.map((alert) => {
             const config = severityConfig[alert.severity];
+            const isWarning = alert.alert_type === 'warning';
+            const isInfection = alert.alert_type === 'infection';
+
             return (
               <div
                 key={alert.id}
-                className={`${config.bg} border ${config.border} rounded-xl p-3 transition-all duration-300 hover:scale-[1.01]`}
+                className={`${config.bg} border ${config.border} rounded-xl p-3 transition-all duration-300 hover:scale-[1.01] ${
+                  isInfection ? 'ring-1 ring-red-500/20' : ''
+                }`}
               >
                 <div className="flex items-start gap-2">
                   <span className="text-sm mt-0.5">{typeIcons[alert.type] || '⚠️'}</span>
                   <div className="flex-1 min-w-0">
-                    <div className="flex items-center gap-2 mb-1">
+                    <div className="flex items-center gap-2 mb-1 flex-wrap">
                       <span className={`text-xs px-2 py-0.5 rounded-full font-medium ${config.badge}`}>
                         {alert.severity}
                       </span>
                       <span className="text-xs text-gray-500 capitalize">{alert.type}</span>
+                      {isWarning && (
+                        <span className="text-[10px] px-1.5 py-0.5 bg-yellow-500/20 text-yellow-400 rounded-md font-medium">
+                          ⚠️ WARNING
+                        </span>
+                      )}
+                      {isInfection && (
+                        <span className="text-[10px] px-1.5 py-0.5 bg-red-500/20 text-red-400 rounded-md font-medium">
+                          🔴 INFECTED
+                        </span>
+                      )}
                     </div>
                     <p className={`text-xs ${config.text} leading-relaxed`}>
                       {alert.message}
                     </p>
+                    {isWarning && alert.distance !== undefined && (
+                      <p className="text-[10px] text-gray-500 mt-1">
+                        📍 Distance: {formatDistance(alert.distance)}
+                      </p>
+                    )}
                     <p className="text-[10px] text-gray-600 mt-1">
-                      {new Date(alert.created_at).toLocaleTimeString()}
+                      Node: {alert.node_id.substring(0, 8)}... • {new Date(alert.created_at).toLocaleTimeString()}
                     </p>
                   </div>
                 </div>

@@ -3,6 +3,8 @@
 import { useState } from 'react';
 import { SensorReading } from '@/lib/simulator';
 import { AnalyticsTab } from './analytics/AnalyticsTab';
+import { InfectionStatusPanel } from './InfectionStatusPanel';
+import { formatDistance } from '@/lib/distance';
 
 interface NodeData {
   node_id: string;
@@ -17,7 +19,10 @@ interface NodeDetailViewProps {
   node: NodeData;
   sensorData: SensorReading | null;
   currentSimMinute: number;
+  dbSensorData: SensorReading[]; // From simulator.ts (database readings)
   onBackToMap: () => void;
+  distanceMatrix: Map<string, Map<string, number>>;
+  allNodes: NodeData[];
 }
 
 const sensorFields: { key: keyof SensorReading; label: string; unit: string; icon: string }[] = [
@@ -38,8 +43,26 @@ const sensorFields: { key: keyof SensorReading; label: string; unit: string; ico
   { key: 'vpd_kpa', label: 'VPD', unit: 'kPa', icon: '🍃' },
 ];
 
-export default function NodeDetailView({ node, sensorData, currentSimMinute, onBackToMap }: NodeDetailViewProps) {
+export default function NodeDetailView({ node, sensorData, currentSimMinute, dbSensorData, onBackToMap, distanceMatrix, allNodes }: NodeDetailViewProps) {
   const [activeTab, setActiveTab] = useState<'overview' | 'analytics'>('overview');
+
+  // Get sorted neighbor distances
+  const neighborDistances = (() => {
+    const distances = distanceMatrix.get(node.node_id);
+    if (!distances) return [];
+
+    const result: Array<{ node: NodeData; distance: number }> = [];
+    distances.forEach((distance, nodeId) => {
+      const neighborNode = allNodes.find(n => n.node_id === nodeId);
+      if (neighborNode) {
+        result.push({ node: neighborNode, distance });
+      }
+    });
+
+    // Sort by distance (nearest first)
+    result.sort((a, b) => a.distance - b.distance);
+    return result;
+  })();
 
   return (
     <div className="h-full flex flex-col bg-gray-900/90 animate-fadeIn overflow-hidden">
@@ -81,13 +104,22 @@ export default function NodeDetailView({ node, sensorData, currentSimMinute, onB
       {/* Node Info */}
       <div className="px-6 pb-4">
         <div className="flex items-center gap-3 mb-2">
-          <div className="w-3 h-3 rounded-full bg-green-500 shadow-lg shadow-green-500/50 animate-pulse" />
+          <div className={`w-3 h-3 rounded-full shadow-lg ${
+            node.status === 'infected'
+              ? 'bg-red-500 shadow-red-500/50 animate-pulse'
+              : node.status === 'at_risk'
+              ? 'bg-yellow-500 shadow-yellow-500/50'
+              : node.status === 'offline'
+              ? 'bg-gray-500 shadow-gray-500/50'
+              : 'bg-green-500 shadow-green-500/50 animate-pulse'
+          }`} />
           <h2 className="text-lg font-semibold text-white truncate">
             {node.node_id.substring(0, 8)}...
           </h2>
           <span className={`px-2 py-0.5 text-xs rounded-full font-medium ${
             node.status === 'online' ? 'bg-green-500/20 text-green-400' :
             node.status === 'infected' ? 'bg-red-500/20 text-red-400' :
+            node.status === 'at_risk' ? 'bg-yellow-500/20 text-yellow-400' :
             'bg-gray-500/20 text-gray-400'
           }`}>
             {node.status}
@@ -147,6 +179,55 @@ export default function NodeDetailView({ node, sensorData, currentSimMinute, onB
                 </div>
               </div>
 
+              {/* Infection Status */}
+              <div className="mt-3">
+                <InfectionStatusPanel
+                  nodeId={node.node_id}
+                  currentSimTime={sensorData.timestamp}
+                />
+              </div>
+
+              {/* Neighbor Distances */}
+              <div className="mt-3 bg-gray-800/70 rounded-xl p-3 border border-gray-700/50">
+                <h4 className="text-xs font-semibold text-gray-300 mb-2 uppercase tracking-wide flex items-center gap-2">
+                  <span>📍</span>
+                  <span>Network Distances</span>
+                </h4>
+                <div className="space-y-1.5 max-h-48 overflow-y-auto">
+                  {neighborDistances.slice(0, 10).map(({ node: neighbor, distance }) => (
+                    <div
+                      key={neighbor.node_id}
+                      className="flex items-center justify-between p-2 rounded-lg bg-gray-900/50 hover:bg-gray-900/70 transition-all"
+                    >
+                      <div className="flex items-center gap-2 flex-1 min-w-0">
+                        <div
+                          className={`w-2 h-2 rounded-full flex-shrink-0 ${
+                            neighbor.status === 'infected'
+                              ? 'bg-red-500 animate-pulse'
+                              : neighbor.status === 'at_risk'
+                              ? 'bg-yellow-500'
+                              : neighbor.status === 'offline'
+                              ? 'bg-gray-500'
+                              : 'bg-green-500'
+                          }`}
+                        />
+                        <span className="text-xs text-gray-300 font-mono truncate">
+                          {neighbor.node_id.substring(0, 8)}...
+                        </span>
+                      </div>
+                      <span className="text-xs font-semibold text-gray-400 ml-2 flex-shrink-0">
+                        {formatDistance(distance)}
+                      </span>
+                    </div>
+                  ))}
+                </div>
+                {neighborDistances.length > 10 && (
+                  <p className="text-[10px] text-gray-600 mt-2 text-center">
+                    Showing nearest 10 of {neighborDistances.length} nodes
+                  </p>
+                )}
+              </div>
+
               <p className="text-[10px] text-gray-600 mt-3 text-center">
                 Last updated: {new Date(sensorData.timestamp).toLocaleTimeString()}
               </p>
@@ -157,8 +238,12 @@ export default function NodeDetailView({ node, sensorData, currentSimMinute, onB
             </div>
           )
         ) : (
-          // Analytics Tab
-          <AnalyticsTab nodeId={node.node_id} currentSimMinute={currentSimMinute} />
+          // Analytics Tab - uses actual database sensor data
+          <AnalyticsTab
+            nodeId={node.node_id}
+            currentSimMinute={currentSimMinute}
+            dbSensorData={dbSensorData}
+          />
         )}
       </div>
 
