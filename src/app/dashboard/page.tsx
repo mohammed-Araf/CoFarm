@@ -20,6 +20,7 @@ import AlertsPanel from './components/AlertsPanel';
 import NodeDiscoveryPanel from './components/NodeDiscoveryPanel';
 import InfiniteCanvas from './components/InfiniteCanvas';
 import NodeDetailView from './components/NodeDetailView';
+import FarmerDashboard from './components/FarmerDashboard';
 
 interface NodeData {
   node_id: string;
@@ -31,6 +32,7 @@ interface NodeData {
 }
 
 export default function DashboardPage() {
+  const [viewMode, setViewMode] = useState<'normal' | 'farmer'>('normal');
   const [user, setUser] = useState<{ id: string } | null>(null);
   const [ownNodes, setOwnNodes] = useState<NodeData[]>([]);
   const [otherNodes, setOtherNodes] = useState<NodeData[]>([]);
@@ -473,6 +475,30 @@ export default function DashboardPage() {
         </div>
 
         <div className="flex items-center gap-3">
+          {/* View Mode Toggle */}
+          <div className="flex items-center bg-gray-800/60 p-1 rounded-lg border border-gray-700/50">
+            <button
+              onClick={() => setViewMode('normal')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                viewMode === 'normal' 
+                  ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30' 
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              Normal
+            </button>
+            <button
+              onClick={() => setViewMode('farmer')}
+              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
+                viewMode === 'farmer' 
+                  ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
+                  : 'text-gray-500 hover:text-gray-300'
+              }`}
+            >
+              Farmer
+            </button>
+          </div>
+
           <button
             onClick={() => router.push('/magic-stick')}
             className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800/60 border border-gray-700/50 rounded-lg text-gray-400 hover:border-purple-500/50 hover:text-purple-400 transition-all text-xs cursor-pointer"
@@ -503,6 +529,16 @@ export default function DashboardPage() {
       </header>
 
       {/* Main Content: 3-column layout */}
+      {viewMode === 'farmer' ? (
+        <div className="flex-1 overflow-hidden bg-gray-900/40 backdrop-blur-xl">
+          <FarmerDashboard 
+            ownNodes={ownNodes}
+            alerts={alerts}
+            criticalAlerts={criticalAlerts}
+            sensorReading={sensorReading}
+          />
+        </div>
+      ) : (
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel: Alerts */}
         <div className="w-72 border-r border-gray-800/80 bg-gray-900/40 backdrop-blur-xl flex-shrink-0 overflow-hidden">
@@ -559,6 +595,7 @@ export default function DashboardPage() {
           />
         </div>
       </div>
+      )}
     </div>
   );
 }

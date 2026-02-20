@@ -104,6 +104,19 @@ The **Magic Stick** page (`/magic-stick`) is an interactive product visualizatio
 
 Access: **Dashboard → 🪄 Magic Stick**
 
+## 🧑‍🌾 Farmer View (AI Assistant)
+
+The platform includes a specialized **Farmer View** that translates complex sensor telemetry and alerts into a simple, conversational summary.
+It uses Google's **Gemini 2.0 Flash** model to generate non-technical advice directly to the farmer.
+
+- Switch between "Normal" (technical) and "Farmer" (simplified) modes via the dashboard header toggle.
+- Assesses current node count, critical alerts, temperature, and moisture to provide instant, contextual advice.
+
+**Prerequisite:** You must have a Gemini API key. Add it to your `.env.local` file:
+```env
+GEMINI_API_KEY=your_api_key_here
+```
+
 ## 🔔 Real-Time Alert System
 
 The platform uses **Supabase Realtime** for cross-client alert delivery:
@@ -126,6 +139,7 @@ Run the migration in your Supabase SQL Editor:
 
 - **Infinite Canvas**: Pan/zoom node visualization with real-time sensor data
 - **16 Sensor Types**: Soil, atmospheric, and weather monitoring
+- **Farmer View**: AI-powered conversational summaries of farm status using Gemini 2.0 Flash
 - **Critical Alerts**: 4 alert types with configurable thresholds
 - **Inter-Cluster Alerts**: Cross-farm notifications within 100m (300m fallback)
 - **Real-Time Sync**: Supabase Realtime for live multi-client updates
@@ -137,6 +151,7 @@ Run the migration in your Supabase SQL Editor:
 
 - **Framework**: Next.js 14 (App Router)
 - **Database**: Supabase (PostgreSQL + Realtime + Auth)
+- **AI Integration**: Google Gemini API (2.0 Flash)
 - **Styling**: Vanilla CSS + Tailwind-free utility classes
 - **Language**: TypeScript
 - **Rendering**: HTML5 Canvas for node visualization
