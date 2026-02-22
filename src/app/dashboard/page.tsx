@@ -1,26 +1,15 @@
 'use client';
 
-import { useEffect, useState, useCallback, useRef } from 'react';
+import { useEffect, useState, useCallback, useRef, useMemo } from 'react';
 import { useRouter } from 'next/navigation';
 import { supabase } from '@/lib/supabase';
-import { SensorReading, Alert, checkForAlerts, generateTimeBasedReading } from '@/lib/simulator';
-import {
-  CriticalAlert,
-  InterClusterAlert,
-  AlertLine,
-  CriticalAlertType,
-  evaluateCriticalAlert,
-  findNodesWithFallback,
-  deduplicateClusterAlerts,
-  getTestOverrideReading,
-  buildAlertLines,
-  NodeData as AlertNodeData,
-} from '@/lib/alertEngine';
+import { SensorReading, Alert, checkForAlerts, generateTimeBasedReading, generateInfectionAlert, generateNeighborWarningAlert } from '@/lib/simulator';
+import { monitorNodeInfection, infectionStateManager } from '@/lib/infection';
+import { calculateDistanceMatrix } from '@/lib/distance';
 import AlertsPanel from './components/AlertsPanel';
 import NodeDiscoveryPanel from './components/NodeDiscoveryPanel';
 import InfiniteCanvas from './components/InfiniteCanvas';
 import NodeDetailView from './components/NodeDetailView';
-import FarmerDashboard from './components/FarmerDashboard';
 
 interface NodeData {
   node_id: string;
@@ -32,7 +21,6 @@ interface NodeData {
 }
 
 export default function DashboardPage() {
-  const [viewMode, setViewMode] = useState<'normal' | 'farmer'>('normal');
   const [user, setUser] = useState<{ id: string } | null>(null);
   const [ownNodes, setOwnNodes] = useState<NodeData[]>([]);
   const [otherNodes, setOtherNodes] = useState<NodeData[]>([]);
@@ -52,12 +40,36 @@ export default function DashboardPage() {
   const [dbSensorData, setDbSensorData] = useState<SensorReading[]>([]);
   const [sensorDataLoading, setSensorDataLoading] = useState(false);
 
-  // ── Critical Alert System ──────────────────────────────────────
-  const [criticalAlerts, setCriticalAlerts] = useState<CriticalAlert[]>([]);
-  const [interClusterAlerts, setInterClusterAlerts] = useState<InterClusterAlert[]>([]);
-  const [alertLines, setAlertLines] = useState<AlertLine[]>([]);
-  const [testTriggerType, setTestTriggerType] = useState<CriticalAlertType | null>(null);
-  const [testTargetNodeId, setTestTargetNodeId] = useState<string | null>(null);
+  // Global sensor data cache for ALL nodes
+  const [allNodesData, setAllNodesData] = useState<Map<string, SensorReading[]>>(new Map());
+  const [dataLoadingProgress, setDataLoadingProgress] = useState<number>(0);
+
+  // Distance matrix and reference point
+  const { refLat, refLng, distanceMatrix } = useMemo(() => {
+    if (ownNodes.length === 0) {
+      return { refLat: 0, refLng: 0, distanceMatrix: new Map() };
+    }
+
+    // Calculate reference point (mean of own nodes)
+    const sumLat = ownNodes.reduce((sum, n) => sum + n.latitude, 0);
+    const sumLng = ownNodes.reduce((sum, n) => sum + n.longitude, 0);
+    const refLat = sumLat / ownNodes.length;
+    const refLng = sumLng / ownNodes.length;
+
+    // Calculate distance matrix for all nodes
+    const allNodes = [...ownNodes, ...otherNodes];
+    const distanceMatrix = calculateDistanceMatrix(
+      allNodes.map(n => ({
+        node_id: n.node_id,
+        latitude: n.latitude,
+        longitude: n.longitude,
+      })),
+      refLat,
+      refLng
+    );
+
+    return { refLat, refLng, distanceMatrix };
+  }, [ownNodes, otherNodes]);
 
   // Prevent page-level zoom (trackpad pinch)
   useEffect(() => {
@@ -114,6 +126,47 @@ export default function DashboardPage() {
     fetchNodes();
   }, [user, router]);
 
+  // Fetch sensor data for ALL nodes (own + others) on dashboard load
+  useEffect(() => {
+    if (!user || ownNodes.length === 0) return;
+
+    const fetchAllNodesSensorData = async () => {
+      const allNodes = [...ownNodes, ...otherNodes];
+      const dataMap = new Map<string, SensorReading[]>();
+
+      console.log(`[Global Data Fetch] Loading sensor data for ${allNodes.length} nodes...`);
+
+      // Fetch in parallel batches of 10 to avoid overwhelming the connection
+      const batchSize = 10;
+      for (let i = 0; i < allNodes.length; i += batchSize) {
+        const batch = allNodes.slice(i, i + batchSize);
+        const promises = batch.map(node =>
+          supabase
+            .from('sensor_data')
+            .select('*')
+            .eq('node_id', node.node_id)
+            .order('timestamp', { ascending: true })
+            .range(0, 1439)
+        );
+
+        const results = await Promise.all(promises);
+        results.forEach((result, idx) => {
+          if (result.data) {
+            dataMap.set(batch[idx].node_id, result.data as SensorReading[]);
+            console.log(`[Global Data Fetch] Loaded ${result.data.length} readings for node ${batch[idx].node_id}`);
+          }
+        });
+
+        setDataLoadingProgress(Math.min(100, ((i + batchSize) / allNodes.length) * 100));
+      }
+
+      setAllNodesData(dataMap);
+      console.log(`[Global Data Fetch] Complete! Cached data for ${dataMap.size} nodes`);
+    };
+
+    fetchAllNodesSensorData();
+  }, [user, ownNodes, otherNodes]);
+
   // Simulation timer loop
   useEffect(() => {
     if (simIntervalRef.current) {
@@ -151,12 +204,14 @@ export default function DashboardPage() {
         .from('sensor_data')
         .select('*')
         .eq('node_id', selectedNode.node_id)
-        .order('timestamp', { ascending: true });
+        .order('timestamp', { ascending: true })
+        .range(0, 1439); // Explicitly request rows 0-1439 (1440 total rows)
 
       if (error) {
         console.error('Error fetching sensor data:', error);
         setDbSensorData([]);
       } else {
+        console.log(`[Data Fetch] Retrieved ${data?.length || 0} rows from database`);
         setDbSensorData((data as SensorReading[]) || []);
       }
       setSensorDataLoading(false);
@@ -165,6 +220,155 @@ export default function DashboardPage() {
     fetchSensorData();
   }, [selectedNode]);
 
+  // Global infection monitoring - check ALL nodes at current simMinutes
+  useEffect(() => {
+    if (allNodesData.size === 0 || distanceMatrix.size === 0) return;
+
+    const allNodes = [...ownNodes, ...otherNodes];
+    const updates: { nodeId: string; newStatus: string }[] = [];
+    const newAlerts: Alert[] = [];
+
+    // Generate current simulation timestamp
+    const hh = Math.floor(simMinutes / 60).toString().padStart(2, '0');
+    const mm = Math.floor(simMinutes % 60).toString().padStart(2, '0');
+    const currentDate = new Date().toISOString().split('T')[0];
+    const currentSimTime = `${currentDate}T${hh}:${mm}:00.000Z`;
+
+    // First pass: Check each node for infection
+    const infectedNodes = new Set<string>();
+    const newlyInfectedNodes = new Map<string, any>(); // nodeId -> triggers
+
+    for (const node of allNodes) {
+      const nodeData = allNodesData.get(node.node_id);
+      if (!nodeData || nodeData.length === 0) continue;
+
+      // Find reading at simMinutes (same matching logic as selected node)
+      let bestIdx = 0;
+      let bestDiff = Infinity;
+
+      for (let i = 0; i < nodeData.length; i++) {
+        const ts = new Date(nodeData[i].timestamp);
+        const rowMinutes = ts.getUTCHours() * 60 + ts.getUTCMinutes();
+        const diff = Math.abs(rowMinutes - simMinutes);
+        const wrapDiff = 1440 - diff;
+        const minDiff = Math.min(diff, wrapDiff);
+        if (minDiff < bestDiff) {
+          bestDiff = minDiff;
+          bestIdx = i;
+        }
+      }
+
+      const reading = {
+        ...nodeData[bestIdx],
+        timeMinute: simMinutes,
+      };
+
+      // Monitor infection for this node
+      const wasInfected = node.status === 'infected';
+      const newStatus = monitorNodeInfection(node.node_id, reading, currentSimTime);
+      const isNowInfected = newStatus === 'infected';
+
+      if (isNowInfected) {
+        infectedNodes.add(node.node_id);
+
+        // Track newly infected nodes (just became infected)
+        if (!wasInfected) {
+          const infectionState = infectionStateManager.getState(node.node_id);
+          newlyInfectedNodes.set(node.node_id, infectionState.triggers);
+
+          // Generate infection alert for this node
+          const infectionAlert = generateInfectionAlert(node.node_id, infectionState.triggers);
+          newAlerts.push(infectionAlert);
+        }
+      }
+
+      if (newStatus !== node.status) {
+        updates.push({ nodeId: node.node_id, newStatus });
+      }
+    }
+
+    // Second pass: Check for at-risk nodes (nearest neighbor is infected)
+    for (const node of allNodes) {
+      // Skip if already infected
+      if (infectedNodes.has(node.node_id)) continue;
+
+      // Get distances to all other nodes
+      const distances = distanceMatrix.get(node.node_id);
+      if (!distances) continue;
+
+      // Find nearest neighbor
+      let nearestDistance = Infinity;
+      let nearestNodeId = '';
+      distances.forEach((distance: number, otherNodeId: string) => {
+        if (distance < nearestDistance) {
+          nearestDistance = distance;
+          nearestNodeId = otherNodeId;
+        }
+      });
+
+      // Check if nearest neighbor is infected
+      const nearestIsInfected = infectedNodes.has(nearestNodeId);
+      const nearestJustBecameInfected = newlyInfectedNodes.has(nearestNodeId);
+      const currentlyAtRisk = node.status === 'at_risk';
+
+      if (nearestIsInfected && !currentlyAtRisk) {
+        // Set to at_risk
+        infectionStateManager.setAtRisk(node.node_id, nearestNodeId, nearestDistance);
+        updates.push({ nodeId: node.node_id, newStatus: 'at_risk' });
+
+        // Generate warning alert if the neighbor just became infected
+        if (nearestJustBecameInfected) {
+          const triggers = newlyInfectedNodes.get(nearestNodeId);
+          const primaryTriggerType = triggers && triggers.length > 0 ? triggers[0].type : 'anomaly';
+          const warningAlert = generateNeighborWarningAlert(
+            node.node_id,
+            nearestNodeId,
+            nearestDistance,
+            primaryTriggerType
+          );
+          newAlerts.push(warningAlert);
+        }
+      } else if (!nearestIsInfected && currentlyAtRisk) {
+        // Clear at_risk status
+        infectionStateManager.setOnline(node.node_id);
+        updates.push({ nodeId: node.node_id, newStatus: 'online' });
+      }
+    }
+
+    // Batch update all nodes that changed status
+    if (updates.length > 0) {
+      setOwnNodes(prev =>
+        prev.map(node => {
+          const update = updates.find(u => u.nodeId === node.node_id);
+          return update ? { ...node, status: update.newStatus } : node;
+        })
+      );
+
+      setOtherNodes(prev =>
+        prev.map(node => {
+          const update = updates.find(u => u.nodeId === node.node_id);
+          return update ? { ...node, status: update.newStatus } : node;
+        })
+      );
+
+      // Update selectedNode if it changed
+      if (selectedNode) {
+        const selectedUpdate = updates.find(u => u.nodeId === selectedNode.node_id);
+        if (selectedUpdate) {
+          setSelectedNode(prev => prev ? { ...prev, status: selectedUpdate.newStatus } : prev);
+        }
+      }
+    }
+
+    // Add new alerts to the alerts feed
+    if (newAlerts.length > 0) {
+      setAlerts(prev => {
+        const updated = [...newAlerts, ...prev];
+        return updated.slice(0, 50); // Keep last 50 alerts
+      });
+    }
+  }, [simMinutes, allNodesData, ownNodes, otherNodes, selectedNode, distanceMatrix]);
+
   // Map simMinutes to the closest sensor_data row from DB
   useEffect(() => {
     if (!selectedNode || dbSensorData.length === 0) {
@@ -172,13 +376,15 @@ export default function DashboardPage() {
       return;
     }
 
+    console.log(`[Timestamp Sync] simMinutes: ${simMinutes}, dbSensorData count: ${dbSensorData.length}`);
+
     // Find the closest reading by comparing simMinutes to the timestamp's hour:minute
     let bestIdx = 0;
     let bestDiff = Infinity;
 
     for (let i = 0; i < dbSensorData.length; i++) {
       const ts = new Date(dbSensorData[i].timestamp);
-      const rowMinutes = ts.getHours() * 60 + ts.getMinutes();
+      const rowMinutes = ts.getUTCHours() * 60 + ts.getUTCMinutes();
       const diff = Math.abs(rowMinutes - simMinutes);
       // Also consider wrapping around midnight
       const wrapDiff = 1440 - diff;
@@ -190,6 +396,11 @@ export default function DashboardPage() {
     }
 
     const reading = dbSensorData[bestIdx];
+    const matchedTs = new Date(reading.timestamp);
+    const matchedMinutes = matchedTs.getUTCHours() * 60 + matchedTs.getUTCMinutes();
+    console.log(`[Timestamp Sync] Matched index ${bestIdx}: sim=${simMinutes}min (${Math.floor(simMinutes/60)}:${simMinutes%60}), db=${matchedMinutes}min (${matchedTs.getUTCHours()}:${matchedTs.getUTCMinutes()}), diff=${bestDiff}min`);
+    console.log(`[Timestamp Sync] Reading tVOC: ${reading.tvoc_ugm3}, timestamp: ${reading.timestamp}`);
+
     setSensorReading(reading);
 
     // Generate alerts from reading
@@ -201,194 +412,6 @@ export default function DashboardPage() {
       });
     }
   }, [selectedNode, simMinutes, dbSensorData, sensorDataLoading]);
-
-  // ── Critical Alert Evaluation ────────────────────────────────
-  // When test trigger is active: evaluate locally + write to Supabase `alerts` table.
-  // Also subscribe to Supabase Realtime to receive alerts from OTHER users.
-
-  // Write to Supabase when local test trigger fires
-  useEffect(() => {
-    if (ownNodes.length === 0 || !user) return;
-
-    if (!testTriggerType) {
-      // Clear local alerts
-      setCriticalAlerts((prev) => prev.filter(a => a.sourceClusterId !== user.id));
-      setInterClusterAlerts((prev) => prev.filter(a => a.sourceClusterId !== user.id));
-      // Mark our critical alerts as inactive (triggers UPDATE event for receivers)
-      supabase
-        .from('alerts')
-        .update({ is_active: false })
-        .eq('source_cluster_id', user.id)
-        .eq('is_critical', true)
-        .eq('is_active', true)
-        .then(() => {});
-      return;
-    }
-
-    const allNodes = [...ownNodes, ...otherNodes];
-    const testNode = ownNodes.find(n => n.node_id === testTargetNodeId) || ownNodes[0];
-    const baseReading = generateTimeBasedReading(testNode.node_id, simMinutes);
-    const reading = getTestOverrideReading(testTriggerType, baseReading);
-
-    const critical = evaluateCriticalAlert(reading, testNode as AlertNodeData);
-    if (critical) {
-      // Update local state
-      setCriticalAlerts((prev) => {
-        const filtered = prev.filter(a => a.sourceClusterId !== user.id);
-        return [...filtered, critical];
-      });
-
-      // Sender: only show red node glow, don't compute connection lines
-      // (connection lines are only for the receiver side)
-
-      // Persist to Supabase alerts table
-      // First deactivate any existing, then insert new
-      supabase
-        .from('alerts')
-        .update({ is_active: false })
-        .eq('source_cluster_id', critical.sourceClusterId)
-        .eq('is_critical', true)
-        .then(() => {
-          supabase
-            .from('alerts')
-            .insert({
-              node_id: critical.sourceNodeId,
-              source_cluster_id: critical.sourceClusterId,
-              type: critical.type,
-              severity: 'critical',
-              message: critical.message,
-              is_critical: true,
-              radius_meters: 100,
-              is_active: true,
-            })
-            .then(({ error }) => {
-              if (error) console.error('Error writing critical alert:', error);
-            });
-        });
-    }
-  }, [ownNodes, otherNodes, simMinutes, testTriggerType, testTargetNodeId, user]);
-
-  // Subscribe to Supabase Realtime for critical alerts from OTHER users
-  useEffect(() => {
-    if (!user || ownNodes.length === 0) return;
-
-    const allNodes = [...ownNodes, ...otherNodes];
-
-    // Fetch existing active critical alerts on mount
-    const fetchExisting = async () => {
-      const { data, error } = await supabase
-        .from('alerts')
-        .select('*')
-        .eq('is_critical', true)
-        .eq('is_active', true)
-        .neq('source_cluster_id', user.id);
-
-      if (error) {
-        console.error('Error fetching critical alerts:', error);
-        return;
-      }
-
-      if (data && data.length > 0) {
-        const remoteCriticals: CriticalAlert[] = [];
-        const remoteInterCluster: InterClusterAlert[] = [];
-
-        for (const row of data) {
-          const sourceNode = allNodes.find(n => n.node_id === row.node_id);
-          if (!sourceNode) continue;
-
-          const ca: CriticalAlert = {
-            id: row.id,
-            sourceNodeId: row.node_id,
-            sourceClusterId: row.source_cluster_id,
-            type: row.type,
-            message: row.message || '',
-            timestamp: row.created_at,
-            lat: sourceNode.latitude,
-            lng: sourceNode.longitude,
-          };
-          remoteCriticals.push(ca);
-
-          const nearby = findNodesWithFallback(sourceNode as AlertNodeData, allNodes as AlertNodeData[]);
-          const deduped = deduplicateClusterAlerts(ca, nearby as AlertNodeData[]);
-          remoteInterCluster.push(...deduped);
-        }
-
-        setCriticalAlerts(prev => {
-          const local = prev.filter(a => a.sourceClusterId === user.id);
-          return [...local, ...remoteCriticals];
-        });
-        setInterClusterAlerts(prev => {
-          const local = prev.filter(a => a.sourceClusterId === user.id);
-          return [...local, ...remoteInterCluster];
-        });
-      }
-    };
-
-    fetchExisting();
-
-    // Subscribe to real-time changes on the alerts table (critical only)
-    const channel = supabase
-      .channel('critical-alerts-realtime')
-      .on(
-        'postgres_changes',
-        { event: 'INSERT', schema: 'public', table: 'alerts', filter: 'is_critical=eq.true' },
-        (payload) => {
-          const row = payload.new as Record<string, string | number | boolean>;
-          if (row.source_cluster_id === user.id) return;
-
-          const sourceNode = allNodes.find(n => n.node_id === row.node_id);
-          if (!sourceNode) return;
-
-          const ca: CriticalAlert = {
-            id: row.id as string,
-            sourceNodeId: row.node_id as string,
-            sourceClusterId: row.source_cluster_id as string,
-            type: row.type as CriticalAlertType,
-            message: (row.message || '') as string,
-            timestamp: (row.created_at || new Date().toISOString()) as string,
-            lat: sourceNode.latitude,
-            lng: sourceNode.longitude,
-          };
-
-          setCriticalAlerts(prev => [...prev.filter(a => a.id !== ca.id), ca]);
-
-          const nearby = findNodesWithFallback(sourceNode as AlertNodeData, allNodes as AlertNodeData[]);
-          const deduped = deduplicateClusterAlerts(ca, nearby as AlertNodeData[]);
-          setInterClusterAlerts(prev => {
-            const filtered = prev.filter(a => a.sourceClusterId !== ca.sourceClusterId);
-            return [...filtered, ...deduped];
-          });
-        }
-      )
-      .on(
-        'postgres_changes',
-        { event: 'UPDATE', schema: 'public', table: 'alerts', filter: 'is_critical=eq.true' },
-        (payload) => {
-          const row = payload.new as Record<string, string | number | boolean>;
-          if (row.source_cluster_id === user.id) return;
-
-          // If alert was deactivated, remove from state
-          if (row.is_active === false) {
-            setCriticalAlerts(prev => prev.filter(a =>
-              a.sourceClusterId !== (row.source_cluster_id as string)
-            ));
-            setInterClusterAlerts(prev => prev.filter(a =>
-              a.sourceClusterId !== (row.source_cluster_id as string)
-            ));
-          }
-        }
-      )
-      .subscribe();
-
-    return () => {
-      supabase.removeChannel(channel);
-    };
-  }, [user, ownNodes, otherNodes]);
-
-  // Rebuild alert lines whenever critical/inter-cluster alerts change
-  useEffect(() => {
-    setAlertLines(buildAlertLines(criticalAlerts, interClusterAlerts));
-  }, [criticalAlerts, interClusterAlerts]);
 
   const handleNodeClick = (node: NodeData) => {
     // Only allow detail view for own nodes
@@ -418,27 +441,25 @@ export default function DashboardPage() {
     setSimMinutes(Math.floor(Math.max(0, Math.min(1439, minutes))));
   }, []);
 
-  const handleTestTrigger = useCallback((type: CriticalAlertType) => {
-    setTestTriggerType(type);
-  }, []);
-
-  const handleClearTestTrigger = useCallback(() => {
-    setTestTriggerType(null);
-  }, []);
-
-  const handleTestNodeChange = useCallback((nodeId: string) => {
-    setTestTargetNodeId(nodeId);
-  }, []);
-
-  if (loading) {
+  if (loading || dataLoadingProgress < 100) {
     return (
       <div className="gradient-bg min-h-screen flex items-center justify-center">
-        <div className="flex items-center gap-3">
+        <div className="flex flex-col items-center gap-3">
           <svg className="animate-spin h-6 w-6 text-green-500" viewBox="0 0 24 24">
             <circle className="opacity-25" cx="12" cy="12" r="10" stroke="currentColor" strokeWidth="4" fill="none" />
             <path className="opacity-75" fill="currentColor" d="M4 12a8 8 0 018-8V0C5.373 0 0 5.373 0 12h4z" />
           </svg>
-          <span className="text-gray-400">Loading dashboard...</span>
+          <span className="text-gray-400">
+            {loading ? 'Loading dashboard...' : 'Loading network sensor data...'}
+          </span>
+          {dataLoadingProgress > 0 && dataLoadingProgress < 100 && (
+            <div className="w-64 h-2 bg-gray-800 rounded-full overflow-hidden">
+              <div
+                className="h-full bg-green-500 transition-all duration-300"
+                style={{ width: `${dataLoadingProgress}%` }}
+              />
+            </div>
+          )}
         </div>
       </div>
     );
@@ -461,57 +482,17 @@ export default function DashboardPage() {
           <span className="text-gray-500 text-xs">
             {ownNodes.length} node{ownNodes.length !== 1 ? 's' : ''} registered
           </span>
-          {criticalAlerts.length > 0 && (
-            <>
-              <span className="text-gray-600 text-xs">|</span>
-              <span className="flex items-center gap-1.5 px-2 py-0.5 bg-red-500/15 border border-red-500/30 rounded-full animate-pulse">
-                <div className="w-1.5 h-1.5 rounded-full bg-red-500" />
-                <span className="text-[10px] text-red-400 font-semibold uppercase tracking-wider">
-                  {criticalAlerts.length} Critical Alert{criticalAlerts.length !== 1 ? 's' : ''}
-                </span>
-              </span>
-            </>
-          )}
         </div>
 
         <div className="flex items-center gap-3">
-          {/* View Mode Toggle */}
-          <div className="flex items-center bg-gray-800/60 p-1 rounded-lg border border-gray-700/50">
-            <button
-              onClick={() => setViewMode('normal')}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                viewMode === 'normal' 
-                  ? 'bg-purple-500/20 text-purple-400 border border-purple-500/30' 
-                  : 'text-gray-500 hover:text-gray-300'
-              }`}
-            >
-              Normal
-            </button>
-            <button
-              onClick={() => setViewMode('farmer')}
-              className={`px-3 py-1.5 rounded-md text-xs font-medium transition-all ${
-                viewMode === 'farmer' 
-                  ? 'bg-green-500/20 text-green-400 border border-green-500/30' 
-                  : 'text-gray-500 hover:text-gray-300'
-              }`}
-            >
-              Farmer
-            </button>
-          </div>
-
           <button
-            onClick={() => router.push('/magic-stick')}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800/60 border border-gray-700/50 rounded-lg text-gray-400 hover:border-purple-500/50 hover:text-purple-400 transition-all text-xs cursor-pointer"
+            onClick={() => router.push('/nodes/new')}
+            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800/60 border border-gray-700/50 rounded-lg text-gray-400 hover:border-green-500/50 hover:text-green-400 transition-all text-xs cursor-pointer"
           >
-            <span className="text-sm">🪄</span>
-            Magic Stick
-          </button>
-          <button
-            onClick={() => router.push('/settings')}
-            className="flex items-center gap-1.5 px-3 py-1.5 bg-gray-800/60 border border-gray-700/50 rounded-lg text-gray-400 hover:border-orange-500/50 hover:text-orange-400 transition-all text-xs cursor-pointer"
-          >
-            <span className="text-sm">⚙️</span>
-            Settings
+            <svg className="w-3.5 h-3.5" fill="none" stroke="currentColor" viewBox="0 0 24 24">
+              <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={2} d="M12 4v16m8-8H4" />
+            </svg>
+            Add Node
           </button>
           <div className="flex items-center gap-1.5 px-3 py-1 bg-green-500/10 border border-green-500/20 rounded-full">
             <div className={`w-1.5 h-1.5 rounded-full ${isPlaying ? 'bg-green-500 animate-pulse' : 'bg-gray-500'}`} />
@@ -529,31 +510,12 @@ export default function DashboardPage() {
       </header>
 
       {/* Main Content: 3-column layout */}
-      {viewMode === 'farmer' ? (
-        <div className="flex-1 overflow-hidden bg-gray-900/40 backdrop-blur-xl">
-          <FarmerDashboard 
-            ownNodes={ownNodes}
-            alerts={alerts}
-            criticalAlerts={criticalAlerts}
-            sensorReading={sensorReading}
-          />
-        </div>
-      ) : (
       <div className="flex-1 flex overflow-hidden">
         {/* Left Panel: Alerts */}
         <div className="w-72 border-r border-gray-800/80 bg-gray-900/40 backdrop-blur-xl flex-shrink-0 overflow-hidden">
           <AlertsPanel
             alerts={alerts}
-            interClusterAlerts={interClusterAlerts}
-            criticalAlerts={criticalAlerts}
-            ownNodes={ownNodes}
-            testTargetNodeId={testTargetNodeId || (ownNodes[0]?.node_id ?? '')}
-            userId={user?.id || ''}
             onAddNode={() => router.push('/nodes/new')}
-            onTestTrigger={handleTestTrigger}
-            onClearTestTrigger={handleClearTestTrigger}
-            onTestNodeChange={handleTestNodeChange}
-            isTestActive={testTriggerType !== null}
           />
         </div>
 
@@ -566,8 +528,6 @@ export default function DashboardPage() {
                 otherNodes={otherNodes}
                 currentUserId={user?.id || ''}
                 onNodeClick={handleNodeClick}
-                criticalAlerts={criticalAlerts}
-                alertLines={alertLines}
               />
             </div>
           ) : (
@@ -575,7 +535,10 @@ export default function DashboardPage() {
               node={selectedNode}
               sensorData={sensorReading}
               currentSimMinute={simMinutes}
+              dbSensorData={dbSensorData}
               onBackToMap={handleBackToCanvas}
+              distanceMatrix={distanceMatrix}
+              allNodes={[...ownNodes, ...otherNodes]}
             />
           )}
         </div>
@@ -595,7 +558,6 @@ export default function DashboardPage() {
           />
         </div>
       </div>
-      )}
     </div>
   );
 }

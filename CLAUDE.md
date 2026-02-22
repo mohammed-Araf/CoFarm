@@ -1,4 +1,4 @@
-# Task.md
+# CLAUDE.md
 
 This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
 
@@ -81,12 +81,22 @@ src/
 
 ### Simulation System
 
-The simulator (`lib/simulator.ts`) generates realistic time-based sensor data with diurnal patterns:
+The simulator (`lib/simulator.ts`) generates realistic time-based sensor data with diurnal patterns **and infection events**:
 
 - **Time-based readings**: `generateTimeBasedReading(nodeId, simMinutes)` where `simMinutes` is 0-1439 (representing 00:00 to 23:59)
 - **Diurnal patterns**: Solar irradiance peaks at noon, temperature peaks at 14:00, humidity inversely correlates with solar angle
 - **Node-specific variation**: Each node has consistent but slightly different readings based on node_id seed
+- **Infection events**:
+  - **Pest infestations**: ~10% chance during warm daylight (temp >25°C) → tVOC spikes to 90-170 µg/m³
+  - **Equipment failures**: ~5% chance → soil moisture drops to 0.05-0.10 m³/m³
+  - **Chemical spills**: ~3% chance → pH jumps to 4.0 or 8.5
 - **Alert generation**: `checkForAlerts(reading)` creates alerts for extreme conditions (heat, drought, frost, TVOC)
+
+Dashboard simulation state:
+- `simMinutes`: Current simulated time (0-1439)
+- `simSpeed`: Multiplier for simulation speed (1x, 2x, 4x, 8x, 16x)
+- `isPlaying`: Whether simulation is running
+- **Database integration**: Sensor readings stored in `sensor_data` table, fetched and displayed in real-time
 
 Dashboard simulation state:
 - `simMinutes`: Current simulated time (0-1439)
@@ -207,12 +217,39 @@ const UNIT_METERS = 10;
 ## Testing the Simulation
 
 1. Create an account and add nodes via `/nodes/new`
-2. Use the simulation controls in the right panel to play/pause and adjust speed
+2. Use the simulation controls in the right panel to play/pause and adjust speed (1x-16x)
 3. Select a node to view its time-based sensor readings
 4. Alerts are generated automatically when readings exceed thresholds
+5. **Data Consistency**: Overview and Analytics tabs show **identical data** from database
+6. **Infection Testing**: Wait for warm afternoons (14:00-16:00) to see pest infections (tVOC >90)
+
+## Infection System
+
+The node infection system is now **fully implemented** and monitors sensor nodes for critical contamination:
+
+### Infection Triggers
+- **tVOC Absolute**: >90 µg/m³ triggers immediate infection (pest indicator)
+- **Z-Score Anomalies**: Readings with Z-score ≥4.0 (extreme outliers)
+  - **Only non-diurnal fields**: Excludes solar, temperature, VPD, dew point
+  - **Focuses on stable sensors**: Soil moisture, pH, EC, pressure, rainfall, etc.
+- **Sustained Issues**: ≥3 extreme readings for same sensor in 24 hours
+- **System Failure**: ≥3 concurrent sensor anomalies in 30-minute window
+
+### Recovery
+- **Duration**: 180 simulated minutes (3 hours) minimum quarantine
+- **Normalization**: Readings must return to normal ranges
+- **Automatic**: System checks every simulation tick and auto-recovers
+
+### UI Components
+- `InfectionStatusPanel`: Shows infection details, triggers, and recovery countdown
+- Visual indicators: Red pulsing nodes on canvas/map
+- Console logging for infection events
+
+See `INFECTION_SYSTEM.md` for complete documentation.
 
 ## Future Considerations
 
-- The `infected` status and node infection mechanics are defined in the schema but not yet implemented in the UI
+- Add infection spread mechanics (geographic proximity-based)
+- Persist infection state to database for multi-session continuity
 - Alert system currently generates alerts in-memory; may want to persist to database
 - Sensor data table exists but readings are currently simulated client-side only

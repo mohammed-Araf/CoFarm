@@ -4,6 +4,7 @@ import { useState, useRef } from 'react';
 import { supabase } from '@/lib/supabase';
 import { useRouter } from 'next/navigation';
 import Papa from 'papaparse';
+import { generateTimeBasedReading } from '@/lib/simulator';
 
 interface NodeFormData {
   node_id: string;
@@ -71,7 +72,7 @@ export default function NewNodePage() {
       if (!user) throw new Error('Not authenticated');
 
       const nodeRecords = nodes.map((n) => ({
-        node_id: n.node_id || ((typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`),
+        node_id: n.node_id || crypto.randomUUID(),
         latitude: parseFloat(n.latitude),
         longitude: parseFloat(n.longitude),
         elevation_m: n.elevation_m ? parseFloat(n.elevation_m) : null,
@@ -84,6 +85,39 @@ export default function NewNodePage() {
         .insert(nodeRecords);
 
       if (insertError) throw insertError;
+
+      // Pre-populate sensor_data with 24 hours of readings for each node
+      console.log('Generating 24-hour sensor data for', nodeRecords.length, 'nodes...');
+      const sensorDataRecords = [];
+
+      for (const node of nodeRecords) {
+        // Generate 1440 readings (one per minute for 24 hours)
+        for (let minute = 0; minute < 1440; minute++) {
+          const reading = generateTimeBasedReading(node.node_id, minute);
+          sensorDataRecords.push({
+            ...reading,
+            node_id: node.node_id,
+          });
+        }
+      }
+
+      console.log('Inserting', sensorDataRecords.length, 'sensor readings into database...');
+
+      // Insert in batches of 1000 to avoid payload limits
+      const batchSize = 1000;
+      for (let i = 0; i < sensorDataRecords.length; i += batchSize) {
+        const batch = sensorDataRecords.slice(i, i + batchSize);
+        const { error: sensorError } = await supabase
+          .from('sensor_data')
+          .insert(batch);
+
+        if (sensorError) {
+          console.error('Error inserting sensor data batch:', sensorError);
+          throw sensorError;
+        }
+      }
+
+      console.log('✓ Sensor data populated successfully');
       router.push('/dashboard');
     } catch (err: unknown) {
       setError(err instanceof Error ? err.message : 'Failed to register nodes');

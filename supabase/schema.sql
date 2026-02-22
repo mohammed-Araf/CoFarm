@@ -82,6 +82,3 @@ CREATE POLICY "Users can view own alerts" ON alerts
     node_id IN (SELECT node_id FROM nodes WHERE user_id = auth.uid())
   );
 CREATE POLICY "Insert alerts" ON alerts FOR INSERT WITH CHECK (true);
-
--- For inter-cluster critical alert columns and Realtime,
--- see supabase/migrate_critical_alerts.sql

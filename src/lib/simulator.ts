@@ -28,6 +28,9 @@ export interface Alert {
   severity: 'low' | 'medium' | 'high' | 'critical';
   node_id: string;
   created_at: string;
+  alert_type: 'warning' | 'infection';
+  source_node_id?: string; // For warnings: the infected neighbor node
+  distance?: number; // For warnings: distance to infected neighbor (in canvas units)
 }
 
 function rand(min: number, max: number): number {
@@ -103,7 +106,16 @@ export function generateTimeBasedReading(nodeId: string, simMinutes: number): Se
   const humidity = Math.round(Math.max(25, Math.min(98, humidityBase + (nv(4) - 0.5) * 15)) * 100) / 100;
 
   // Soil moisture: gradual decrease during day, slight recovery at night
-  const moistureBase = 0.35 - 0.12 * solarAngle;
+  // Occasional equipment failures cause extreme drops
+  let moistureBase = 0.35 - 0.12 * solarAngle;
+  const moistureFailureSeed = nodeSeed + Math.floor(simMinutes / 180); // Changes every 3 hours
+  const moistureFailure = seededRand(moistureFailureSeed);
+
+  // ~5% chance of sensor/equipment failure (extreme drop)
+  if (moistureFailure > 0.95) {
+    moistureBase = 0.05 + nv(5) * 0.05; // 0.05-0.10 (extreme low, triggers infection)
+  }
+
   const soilMoisture = Math.round(Math.max(0.05, Math.min(0.55, moistureBase + (nv(5) - 0.5) * 0.08)) * 100) / 100;
 
   // CO2: higher at night (plant respiration), lower during day (photosynthesis)
@@ -123,17 +135,55 @@ export function generateTimeBasedReading(nodeId: string, simMinutes: number): Se
     (1 - humidity / 100)) / 10 * 100) / 100;
 
   const soilEc = Math.round((1.2 + (nv(10) - 0.5) * 2 + solarAngle * 0.8) * 100) / 100;
-  const soilPh = Math.round((6.5 + (nv(11) - 0.5) * 1.5) * 100) / 100;
+
+  // Soil pH: normally stable around 6.5
+  // Occasional chemical spills cause extreme pH shifts
+  let soilPhBase = 6.5 + (nv(11) - 0.5) * 1.0;
+  const phAnomalySeed = nodeSeed + Math.floor(simMinutes / 200);
+  const phAnomaly = seededRand(phAnomalySeed);
+
+  // ~3% chance of chemical contamination (extreme pH shift)
+  if (phAnomaly > 0.97) {
+    // Acidic or alkaline spill
+    soilPhBase = seededRand(phAnomalySeed + 1) > 0.5 ? 4.0 : 8.5; // Extreme pH
+  }
+
+  const soilPh = Math.round(soilPhBase * 100) / 100;
   const waterTension = Math.round((20 + solarAngle * 30 + (nv(12) - 0.5) * 15) * 100) / 100;
-  const tvoc = Math.round((50 + solarAngle * 200 + (nv(13) - 0.5) * 80) * 100) / 100;
+
+  // tVOC with pest infection events
+  // Base level: 10-60 µg/m³ (normal background)
+  // Pest events can spike to 90-150 µg/m³ (infection threshold: 90)
+  let tvoc = 30 + (nv(13) - 0.5) * 40; // Base: 10-50 µg/m³
+
+  // Pest activity increases with warmth (air temp > 25°C) and during day
+  if (airTemp > 25 && solarAngle > 0.3) {
+    // Check if this node/time has a pest event (use deterministic seed)
+    const pestEventSeed = nodeSeed + Math.floor(simMinutes / 120); // Changes every 2 hours
+    const pestProbability = seededRand(pestEventSeed);
+
+    // ~10% chance of pest event during warm daylight hours
+    if (pestProbability > 0.9) {
+      // Pest infestation: spike tVOC to infection levels
+      const pestIntensity = seededRand(pestEventSeed + 1);
+      tvoc = 90 + pestIntensity * 80; // 90-170 µg/m³ (triggers infection)
+    } else if (pestProbability > 0.7) {
+      // Moderate pest activity (approaching threshold)
+      tvoc = 60 + (nv(13)) * 40; // 60-100 µg/m³
+    }
+  }
+
   const waterTable = Math.round((2.5 + (nv(14) - 0.5) * 1.5) * 100) / 100;
 
   const hh = Math.floor(simMinutes / 60).toString().padStart(2, '0');
   const mm = Math.floor(simMinutes % 60).toString().padStart(2, '0');
   const ss = Math.floor((simMinutes % 1) * 60).toString().padStart(2, '0');
 
+  // Use current date for consistency
+  const currentDate = new Date().toISOString().split('T')[0];
+
   return {
-    timestamp: `2026-02-19T${hh}:${mm}:${ss}.000Z`,
+    timestamp: `${currentDate}T${hh}:${mm}:${ss}.000Z`,
     soil_moisture_m3m3: soilMoisture,
     soil_temperature_c: soilTemp,
     soil_ec_msm: Math.max(0.1, soilEc),
@@ -185,9 +235,92 @@ export function checkForAlerts(reading: SensorReading): Alert | null {
 
   const chosen = alerts[Math.floor(Math.random() * alerts.length)];
   return {
-    id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`,
+    id: crypto.randomUUID(),
     ...chosen,
     node_id: reading.node_id,
     created_at: new Date().toISOString(),
+    alert_type: 'infection',
+  };
+}
+
+/**
+ * Generate infection alert for a node that just became infected
+ */
+export function generateInfectionAlert(
+  nodeId: string,
+  triggers: Array<{ type: string; message: string; severity: string }>
+): Alert {
+  // Determine alert type and message based on triggers
+  let alertType: Alert['type'] = 'anomaly';
+  let message = 'Infection detected';
+  let severity: Alert['severity'] = 'critical';
+
+  for (const trigger of triggers) {
+    if (trigger.type === 'tvoc_critical') {
+      alertType = 'pest';
+      message = 'INFECTION: Critical pest contamination detected (tVOC spike)';
+      severity = 'critical';
+      break;
+    } else if (trigger.type === 'low_soil_moisture') {
+      alertType = 'drought';
+      message = 'INFECTION: Irrigation system failure (extremely low soil moisture)';
+      severity = 'critical';
+      break;
+    } else if (trigger.type === 'low_humidity') {
+      alertType = 'drought';
+      message = 'INFECTION: Severe drought stress (extremely low humidity)';
+      severity = 'critical';
+      break;
+    }
+  }
+
+  return {
+    id: crypto.randomUUID(),
+    type: alertType,
+    message,
+    severity,
+    node_id: nodeId,
+    created_at: new Date().toISOString(),
+    alert_type: 'infection',
+  };
+}
+
+/**
+ * Generate warning alert for a node whose neighbor became infected
+ */
+export function generateNeighborWarningAlert(
+  nodeId: string,
+  infectedNeighborId: string,
+  distance: number,
+  triggerType: string
+): Alert {
+  let alertType: Alert['type'] = 'anomaly';
+  let message = 'Neighbor node warning: infection detected nearby';
+  let severity: Alert['severity'] = 'high';
+
+  if (triggerType === 'tvoc_critical') {
+    alertType = 'pest';
+    message = `WARNING: Neighbor node (${infectedNeighborId.substring(0, 8)}...) infected with pest contamination`;
+    severity = 'high';
+  } else if (triggerType === 'low_soil_moisture') {
+    alertType = 'drought';
+    message = `WARNING: Neighbor node (${infectedNeighborId.substring(0, 8)}...) has irrigation failure`;
+    severity = 'high';
+  } else if (triggerType === 'low_humidity') {
+    alertType = 'drought';
+    message = `WARNING: Neighbor node (${infectedNeighborId.substring(0, 8)}...) experiencing severe drought`;
+    severity = 'high';
+  }
+
+  return {
+    id: crypto.randomUUID(),
+    type: alertType,
+    message,
+    severity,
+    node_id: nodeId,
+    created_at: new Date().toISOString(),
+    alert_type: 'warning',
+    source_node_id: infectedNeighborId,
+    distance,
   };
 }
