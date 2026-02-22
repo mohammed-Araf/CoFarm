@@ -2,7 +2,6 @@
 
 import { Alert } from '@/lib/simulator';
 import { formatDistance } from '@/lib/distance';
-
 interface AlertsPanelProps {
   alerts: Alert[];
   onAddNode: () => void;
@@ -38,7 +37,7 @@ export default function AlertsPanel({ alerts, onAddNode }: AlertsPanelProps) {
         </div>
       </div>
 
-      {/* Alert List */}
+      {/* Regular Alert List */}
       <div className="flex-1 overflow-y-auto px-3 py-3 space-y-2">
         {alerts.length === 0 ? (
           <div className="flex flex-col items-center justify-center h-full text-gray-500">
@@ -46,6 +45,7 @@ export default function AlertsPanel({ alerts, onAddNode }: AlertsPanelProps) {
               <path strokeLinecap="round" strokeLinejoin="round" strokeWidth={1.5} d="M9 12l2 2 4-4m6 2a9 9 0 11-18 0 9 9 0 0118 0z" />
             </svg>
             <p className="text-sm">All clear — no alerts</p>
+            <p className="text-[10px] text-gray-600 mt-1">Use test triggers above to simulate</p>
           </div>
         ) : (
           alerts.map((alert) => {
