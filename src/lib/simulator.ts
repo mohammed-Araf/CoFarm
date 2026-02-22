@@ -235,7 +235,7 @@ export function checkForAlerts(reading: SensorReading): Alert | null {
 
   const chosen = alerts[Math.floor(Math.random() * alerts.length)];
   return {
-    id: crypto.randomUUID(),
+    id: (typeof crypto !== 'undefined' && crypto.randomUUID) ? crypto.randomUUID() : `${Date.now()}-${Math.random().toString(36).substring(2, 11)}`,
     ...chosen,
     node_id: reading.node_id,
     created_at: new Date().toISOString(),
