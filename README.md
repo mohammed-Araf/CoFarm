@@ -135,6 +135,83 @@ Run the migration in your Supabase SQL Editor:
 -- See supabase/migrate_critical_alerts.sql
 ```
 
+## 📊 System Workflows
+
+### 🌐 Web Application Workflow (Current Implementation)
+
+The current web application uses an event-driven architecture with Supabase Realtime to simulate distributed node intelligence.
+
+```mermaid
+flowchart TD
+    subgraph Data Layer
+        Sim[Data Simulator] --> |Sensor Readings| DB[(Supabase PostgreSQL)]
+        CSV[CSV Upload] --> |Node Registration| DB
+    end
+
+    subgraph Backend & Realtime
+        DB -.->|Supabase Realtime| AlertChannel[Alerts Channel]
+        DB -->|REST APIs| NextJS[Next.js App Router]
+    end
+
+    subgraph Client Application
+        NextJS --> |Initial Render| UI[Dashboard UI / Infinite Canvas]
+        AlertChannel -.->|Live Updates & Glowing Indicators| UI
+        UI -->|Acknowledge Alerts| DB
+        UI -->|Toggle Analysis| FarmerMode[Farmer Assistant Mode]
+    end
+
+    subgraph External AI Services
+        FarmerMode <-->|Telemetry Data + Prompts| Gemini[Google Gemini 2.0 Flash]
+    end
+    
+    classDef db fill:#3ecf8e,stroke:#15803d,stroke-width:2px,color:white;
+    classDef ai fill:#4f46e5,stroke:#3730a3,stroke-width:2px,color:white;
+    class DB db;
+    class Gemini ai;
+```
+
+### 🌱 Real Concept Workflow (Physical Deployment)
+
+If deployed in the real world, the system would rely on physical IoT networks communicating with a centralized time-series architecture, maintaining the core cross-farm alertness pattern.
+
+```mermaid
+flowchart TD
+    subgraph The Farm
+        Node1[🪄 Magic Stick 1]
+        Node2[🪄 Magic Stick 2]
+        Node3[🪄 Magic Stick N]
+        Earth((Soil & Atmosphere)) --> Node1 & Node2 & Node3
+    end
+
+    subgraph Edge Network
+        Node1 & Node2 & Node3 -->|LoRaWAN / NB-IoT| Gateway[Solar Edge Gateway]
+    end
+
+    subgraph Cloud Infrastructure
+        Gateway -->|MQTT / HTTPS| Ingest[Data Ingestion Pipeline]
+        Ingest --> DB[(Time-Series DB / Supabase)]
+        DB --> AlertEngine[Anomaly Detection Engine]
+        AlertEngine -->|Cross-cluster geometric queries| Broadcast[Notification Service]
+    end
+
+    subgraph Action Layer
+        Broadcast -.->|Real-time Webhooks| WebApp[Next.js Dashboard]
+        Broadcast -.->|SMS / Mobile Push| MobileApp[Farmer Mobile Device]
+        
+        WebApp <-->|Contextualize Data| AI[Gemini 2.0 AI]
+        
+        WebApp --> |Technical View| Manager((Farm Manager / Agronomist))
+        WebApp --> |AI Farmer View| Farmer((Local Farmer))
+    end
+
+    classDef hardware fill:#f59e0b,stroke:#d97706,stroke-width:2px,color:black;
+    classDef cloud fill:#0ea5e9,stroke:#0369a1,stroke-width:2px,color:black;
+    classDef ai fill:#4f46e5,stroke:#3730a3,stroke-width:2px,color:white;
+    class Node1,Node2,Node3,Gateway hardware;
+    class DB,Ingest,AlertEngine,Broadcast cloud;
+    class AI ai;
+```
+
 ## 🌾 Features
 
 - **Infinite Canvas**: Pan/zoom node visualization with real-time sensor data
